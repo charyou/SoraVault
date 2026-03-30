@@ -53,7 +53,7 @@ in original quality - in minutes, not hours.
 
 ### Option B: Standalone Desktop App (Mac, Windows, Linux)
 
-No browser needed. No extensions. Coming next week.
+No browser needed. No extensions. Coming next week IF there is any interest.
 
 ---
 
