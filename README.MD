@@ -47,7 +47,7 @@ in original quality - in minutes, not hours.
 ### Option A: Tampermonkey Script (Free)
 
 1. Install [Tampermonkey](https://tampermonkey.net) for your browser
-2. Click [Install SoraVault Script](/tampermonkey/SoraVault_v1.0.user.js)
+2. Click [Install SoraVault Script](tampermonkey/SoraVault_v1.0.user.js)
 3. Go to [sora.chatgpt.com](https://sora.chatgpt.com)
 4. Click the SoraVault panel → Scan → Filter → Download
 
