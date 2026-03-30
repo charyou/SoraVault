@@ -1009,7 +1009,7 @@
         speedIdx = i;
         document.querySelectorAll('.sdl-speed-seg').forEach(el =>
             el.classList.toggle('active', parseInt(el.dataset.spd) === i));
-        const hints   = ['2 workers - 300 ms delay - safe', '4 workers - 150 ms delay - low risk', '8 workers - 60 ms delay - ban risk!'];
+        const hints   = ['2 workers - 300 ms delay - safe', '4 workers - 150 ms delay - aggressive setting', '8 workers - 60 ms delay - use with care, temporary block possible!'];
         const classes = ['', 'warn', 'danger'];
         document.querySelectorAll('.sdl-speed-hint').forEach(h => {
             h.textContent = hints[i]; h.className = 'sdl-speed-hint ' + classes[i];
