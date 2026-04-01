@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SoraVault 2.0
 // @namespace    https://github.com/charyou/SoraVault
-// @version      2.0.2
+// @version      2.0.0
 // @description  Bulk backup Sora content — images, videos, drafts, liked. API-driven, page-independent.
 // @author       Sebastian Haas (charyou)
 // @homepageURL  https://github.com/charyou/SoraVault
@@ -25,7 +25,7 @@
     // =====================================================================
     // CONFIG & RELEASE INFO
     // =====================================================================
-    const VERSION      = '2.0.1';
+    const VERSION      = '2.0.0';
     const RELEASE_DATE = '2026-04-01';
     const GITHUB_REPO  = 'charyou/SoraVault';
     const SORA_SHUTDOWN = new Date('2026-04-26T00:00:00Z');
