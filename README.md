@@ -55,10 +55,12 @@ SoraVault is a free, API-driven tool to bulk export your OpenAI Sora library. Ea
 3. Click the **"Raw"** button (top right of the code window). Tampermonkey will auto-detect the script and prompt you to install it. *(Alternatively, download the file and drag & drop it into your browser).* 4. Go to [sora.chatgpt.com](https://sora.chatgpt.com).
 5. Use the SoraVault panel on the page: **Scan** → **Filter** (optional) → **Download**.
 
+
 ### Option B: Chrome / Edge Extension (for installation in dev mode)
 
-It's ready. Coming VERY soon.
+It's ready. Coming **VERY** soon.
 
+<img src="assets/sora-app.png" height="565">
 
 ---
 
