@@ -58,8 +58,15 @@ SoraVault is a free, API-driven tool to bulk export your OpenAI Sora library. Ea
 
 ### Option B: Chrome / Edge Extension (for installation in dev mode)
 
-It's ready. Coming **VERY** soon.
+[SoraVault 2 - Chrome Extension - Pre-Release](SoraVault 2 - Chrome Extension - Pre-Release (Feature Identical to Tampermonkey).zip)
 
+1. Unzip the file into any folder of choice. 
+2. In Chrome/Edge, go to your extension tab, activate developer mode (it's a small toggle switch, usually located in the top right corner).
+3. Click the "Load unpacked" button that has now appeared at the top left of the page.
+4. Browse to and select the folder where you unzipped the extension files in Step 1.
+5. The SoraVault 2 extension should now appear in your list of installed extensions and is ready to use! Never delete that folder while in use.
+6. For any future updates, just export the new zip to the same folder, go back to your extension tab, scroll down to SoraVault and press "Reload script"
+   
 <img src="assets/sora-app.png" height="565">
 
 ---
