@@ -31,7 +31,7 @@
     const SORA_SHUTDOWN = new Date('2026-04-26T00:00:00Z');
 
     const CFG = {
-        PARALLEL_DOWNLOADS: 2,
+        PARALLEL_DOWNLOADS: 1,
         DOWNLOAD_TXT:       true,
         FILENAME_TEMPLATE:  '{date}_{prompt}_{genId}',
         PROMPT_MAX_LEN:     80,
@@ -60,9 +60,9 @@
     };
 
     const SPEED_PRESETS = [
-        { workers: 2, delay: 300 },
-        { workers: 4, delay: 150 },
-        { workers: 8, delay:  60 },
+        { workers: 3, delay: 300 },
+        { workers: 2, delay: 150 },
+        { workers: 1, delay:  60 },
     ];
 
     const SCAN_STORIES = [
@@ -99,6 +99,11 @@
     let dlMethod           = 'fs';
     let baseDir            = null;
     let cachedUserId       = null;
+    let pendingRetryItems  = [];
+    let lastHaltReason     = '';
+    let lastLowResInfo     = null;
+    let lastFreshUrl       = '';
+    const usedMediaUrls    = new Map();
 
     // Geo-blocking
     let isV2Supported      = true;
@@ -892,14 +897,259 @@
         if (!silent) showToast('JSON manifest saved ✓');
     }
 
+    function appendCacheBuster(url) {
+        try {
+            const u = new URL(url, location.href);
+            u.searchParams.set('_svcb', `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+            return u.toString();
+        } catch(e) {
+            const sep = url.includes('?') ? '&' : '?';
+            return `${url}${sep}_svcb=${Date.now()}`;
+        }
+    }
+
+    async function fetchMediaBlob(url) {
+        try {
+            const r = await _fetch(appendCacheBuster(url), {
+                cache: 'no-store',
+                credentials: 'omit',
+            });
+            if (!r.ok) return null;
+            return await r.blob();
+        } catch(e) {
+            return null;
+        }
+    }
+
+    async function readVideoBlobMetadata(blob) {
+        return new Promise(resolve => {
+            const url = URL.createObjectURL(blob);
+            const v = document.createElement('video');
+            const done = meta => {
+                try { v.pause(); } catch(e) {}
+                v.removeAttribute('src');
+                v.load();
+                URL.revokeObjectURL(url);
+                resolve(meta);
+            };
+            v.preload = 'metadata';
+            v.muted = true;
+            v.playsInline = true;
+            v.onloadedmetadata = () => done({
+                width: v.videoWidth || 0,
+                height: v.videoHeight || 0,
+                duration: Number.isFinite(v.duration) ? v.duration : null,
+            });
+            v.onerror = () => done(null);
+            v.src = url;
+        });
+    }
+
+    async function probeVideoUrlMetadata(url) {
+        return new Promise(resolve => {
+            const v = document.createElement('video');
+            const done = meta => {
+                try { v.pause(); } catch(e) {}
+                v.removeAttribute('src');
+                v.load();
+                resolve(meta);
+            };
+            v.preload = 'metadata';
+            v.muted = true;
+            v.playsInline = true;
+            v.crossOrigin = 'anonymous';
+            v.onloadedmetadata = () => done({
+                width: v.videoWidth || 0,
+                height: v.videoHeight || 0,
+                duration: Number.isFinite(v.duration) ? v.duration : null,
+            });
+            v.onerror = () => done(null);
+            v.src = appendCacheBuster(url);
+        });
+    }
+
+    function getVideoResolutionFloor(item, meta = null) {
+        const ratio = String(item?.ratio || '').trim();
+        const ratioParts = ratio.split(':').map(n => parseFloat(n));
+        const ratioValue = ratioParts.length === 2 && ratioParts[0] > 0 && ratioParts[1] > 0
+            ? (ratioParts[0] / ratioParts[1])
+            : null;
+        const w = Number(item?.width) || 0;
+        const h = Number(item?.height) || 0;
+        const mw = Number(meta?.width) || 0;
+        const mh = Number(meta?.height) || 0;
+        const portrait = h > w || (ratioValue != null && ratioValue < 1) || (mh > mw);
+        const landscape = w > h || (ratioValue != null && ratioValue > 1) || (mw > mh);
+        if (portrait)  return { minWidth: 700,  minHeight: 1200 };
+        if (landscape) return { minWidth: 1200, minHeight: 700 };
+        // If item metadata is ambiguous, treat the measured video as authoritative.
+        if (mw && mh) {
+            return mh >= mw
+                ? { minWidth: 700, minHeight: 1200 }
+                : { minWidth: 1200, minHeight: 700 };
+        }
+        return { minWidth: 700, minHeight: 700 };
+    }
+
+    function isVideoFullResolution(item, meta) {
+        if (!meta || !meta.width || !meta.height) return false;
+        const longSide = Math.max(meta.width, meta.height);
+        const shortSide = Math.min(meta.width, meta.height);
+        if (longSide >= 1280 && shortSide >= 700) return true;
+        const floor = getVideoResolutionFloor(item, meta);
+        return meta.width >= floor.minWidth && meta.height >= floor.minHeight;
+    }
+
+    function getItemRouteId(item) {
+        return String(item?.genId || item?.postId || '').trim();
+    }
+
+    function isViewingItemDetail(item) {
+        const routeId = getItemRouteId(item);
+        if (!routeId) return false;
+        const path = decodeURIComponent(location.pathname || '');
+        return path === `/d/${routeId}` || path.endsWith(`/d/${routeId}`);
+    }
+
+    function getDetailDialogVideoUrls() {
+        const videos = [
+            ...document.querySelectorAll('[role="dialog"] video[data-detail-view-assigned-src]'),
+            ...document.querySelectorAll('[role="dialog"] video[src]'),
+            ...document.querySelectorAll('[data-modal-page-content="true"] video[data-detail-view-assigned-src]'),
+            ...document.querySelectorAll('[data-modal-page-content="true"] video[src]'),
+        ];
+        const urls = [];
+        for (const video of videos) {
+            const candidates = [
+                video.getAttribute('data-detail-view-assigned-src'),
+                video.currentSrc,
+                video.getAttribute('src'),
+            ].filter(Boolean).map(u => u.replace(/&amp;/g, '&'));
+            if (candidates.length) urls.push(candidates[0]);
+        }
+        return [...new Set(urls)];
+    }
+
+    function getDetailDialogVideoUrl() {
+        return getDetailDialogVideoUrls()[0] ?? null;
+    }
+
+    function findFreshVideoUrlInDom(item) {
+        const id = String(item?.genId || item?.postId || '').toLowerCase();
+        if (id) {
+            const videos = [...document.querySelectorAll('video[data-detail-view-assigned-src], video[src]')];
+            for (const video of videos) {
+                const candidates = [
+                    video.getAttribute('data-detail-view-assigned-src'),
+                    video.currentSrc,
+                    video.getAttribute('src'),
+                ].filter(Boolean).map(u => u.replace(/&amp;/g, '&'));
+                const match = candidates.find(u => u.toLowerCase().includes(id));
+                if (match) return match;
+            }
+        }
+        if (isViewingItemDetail(item)) {
+            return getDetailDialogVideoUrl();
+        }
+        return null;
+    }
+
+    function dispatchRouteChange() {
+        window.dispatchEvent(new PopStateEvent('popstate', { state: history.state }));
+    }
+
+    async function visitDetailPageAndExtractVideoUrl(item, timeoutMs = 15000) {
+        const routeId = getItemRouteId(item);
+        if (!routeId) return null;
+        const previousPath = `${location.pathname}${location.search}${location.hash}`;
+        const targetPath = `/d/${encodeURIComponent(routeId)}`;
+        const alreadyThere = isViewingItemDetail(item);
+        const initialUrls = getDetailDialogVideoUrls();
+
+        try {
+            if (!alreadyThere) {
+                log(`Opening detail view for fresh URL: ${routeId}`);
+                history.replaceState(history.state, '', targetPath);
+                dispatchRouteChange();
+            }
+
+            const started = Date.now();
+            let stableUrl = null;
+            let stableHits = 0;
+            while (Date.now() - started < timeoutMs) {
+                const elapsed = Date.now() - started;
+                const candidates = getDetailDialogVideoUrls();
+                const eligible = candidates.filter(u => !mediaUrlOwnedByOtherItem(item, u));
+                const preferred = eligible.find(u => !initialUrls.includes(u))
+                    || eligible[0]
+                    || candidates.find(u => !initialUrls.includes(u))
+                    || candidates[0]
+                    || findFreshVideoUrlInDom(item);
+                if (preferred && (elapsed > 500 || !initialUrls.includes(preferred))) {
+                    if (preferred === stableUrl) stableHits++;
+                    else { stableUrl = preferred; stableHits = 1; }
+                    if (stableHits >= 2 && !mediaUrlOwnedByOtherItem(item, preferred)) return preferred;
+                }
+                await sleep(150);
+            }
+            return null;
+        } finally {
+            if (!alreadyThere) {
+                history.replaceState(history.state, '', previousPath);
+                dispatchRouteChange();
+                await sleep(150);
+            }
+        }
+    }
+
+    async function refreshDownloadUrl(item, preferDom = false) {
+        if (preferDom) {
+            const domUrl = findFreshVideoUrlInDom(item);
+            if (domUrl) {
+                item.downloadUrl = domUrl;
+                return domUrl;
+            }
+            const detailUrl = await visitDetailPageAndExtractVideoUrl(item);
+            if (detailUrl) {
+                item.downloadUrl = detailUrl;
+                return detailUrl;
+            }
+        }
+        item.downloadUrl = null;
+        const fresh = await getDownloadUrl(item);
+        if (fresh) item.downloadUrl = fresh;
+        return fresh;
+    }
+
+    async function fetchValidatedMedia(item, url, ext, logFresh = false) {
+        if (!url) return { ok: false, reason: 'no_url', url, blob: null, meta: null, remoteMeta: null };
+        if (mediaUrlOwnedByOtherItem(item, url)) {
+            log('Rejecting reused media URL from earlier item');
+            return { ok: false, reason: 'stale_url', url, blob: null, meta: null, remoteMeta: null };
+        }
+        if (logFresh) {
+            lastFreshUrl = url;
+            log(`Fresh URL: ${url}`);
+        }
+        let remoteMeta = null;
+        if (ext === '.mp4' && logFresh) {
+            remoteMeta = await probeVideoUrlMetadata(url);
+            if (remoteMeta) log(`Browser probe: ${remoteMeta.width}x${remoteMeta.height}`);
+            else log('Browser probe failed');
+        }
+        const blob = await fetchMediaBlob(url);
+        if (!blob) return { ok: false, reason: 'fetch_failed', url, blob: null, meta: null, remoteMeta };
+        if (ext !== '.mp4') return { ok: true, reason: '', url, blob, meta: null, remoteMeta };
+        const meta = await readVideoBlobMetadata(blob);
+        const ok = isVideoFullResolution(item, meta);
+        return { ok, reason: ok ? '' : 'low_res', url, blob, meta, remoteMeta };
+    }
+
     // =====================================================================
     // FILE SYSTEM HELPERS
     // =====================================================================
-    async function downloadFileFS(url, filename, dir) {
+    async function downloadFileFS(blob, filename, dir) {
         try {
-            const r = await _fetch(url);
-            if (!r.ok) return false;
-            const blob = await r.blob();
             const fh = await dir.getFileHandle(filename, { create: true });
             const w  = await fh.createWritable();
             await w.write(blob); await w.close();
@@ -916,14 +1166,15 @@
         } catch(e) { return false; }
     }
 
-    function downloadFileGM(url, subfolder, filename) {
+    function downloadFileGM(blob, subfolder, filename) {
         return new Promise(resolve => {
             const name = subfolder ? `${subfolder}/${filename}` : filename;
+            const dataUrl = URL.createObjectURL(blob);
             GM_download({
-                url, name, saveAs: false,
-                onload:    ()  => resolve(true),
-                onerror:   (e) => { log(`GM err: ${e?.error || 'unknown'}`); resolve(false); },
-                ontimeout: ()  => { log('GM timeout'); resolve(false); },
+                url: dataUrl, name, saveAs: false,
+                onload:    ()  => { URL.revokeObjectURL(dataUrl); resolve(true); },
+                onerror:   (e) => { URL.revokeObjectURL(dataUrl); log(`GM err: ${e?.error || 'unknown'}`); resolve(false); },
+                ontimeout: ()  => { URL.revokeObjectURL(dataUrl); log('GM timeout'); resolve(false); },
             });
         });
     }
@@ -1061,7 +1312,10 @@
         isRunning = true; stopRequested = false;
         collected.clear(); completedCount = 0; failedCount = 0;
         cachedUserId = null;
+        pendingRetryItems = []; lastHaltReason = ''; lastLowResInfo = null;
+        usedMediaUrls.clear();
         resetFilters();
+        refreshRetryUI();
 
         SCAN_SOURCES.forEach(s => setSrcStatus(s.id, enabledSources.has(s.id) ? 'pending' : 'idle'));
 
@@ -1096,8 +1350,28 @@
     // DOWNLOAD
     // =====================================================================
     async function startDownload() {
+        return beginDownload(getFilteredItems(), false);
+    }
+
+    async function retryPendingDownloads(refreshUrls = false) {
+        if (!pendingRetryItems.length || isRunning) return;
+        return beginDownload([...pendingRetryItems], refreshUrls);
+    }
+
+    function rememberMediaUrl(item, url) {
+        if (!url) return;
+        usedMediaUrls.set(url, getItemRouteId(item) || item.genId || item.postId || '');
+    }
+
+    function mediaUrlOwnedByOtherItem(item, url) {
+        if (!url) return false;
+        const owner = usedMediaUrls.get(url);
+        const self = getItemRouteId(item) || item.genId || item.postId || '';
+        return !!owner && owner !== self;
+    }
+
+    async function beginDownload(items, refreshUrls = false) {
         if (isRunning) return;
-        const items = getFilteredItems();
         if (items.length === 0) return;
 
         const saveMedia = readConfigBool('SAVE_MEDIA', true);
@@ -1112,10 +1386,10 @@
         const hasFS = typeof window.showDirectoryPicker === 'function';
         const hasGM = typeof GM_download === 'function';
 
-        baseDir = null;
-
         if (saveMedia || saveTxt) {
-            if (hasFS) {
+            if (baseDir && dlMethod === 'fs') {
+                // Reuse the previously approved folder for retries.
+            } else if (hasFS) {
                 try {
                     baseDir = await window.showDirectoryPicker({ mode: 'readwrite' });
                     dlMethod = 'fs';
@@ -1140,11 +1414,21 @@
         lastSaveMedia  = saveMedia;
         lastSaveJSON   = saveJSON;
         lastFilterSnap = snapshotActiveFilters();
+        lastHaltReason = '';
+        lastLowResInfo = null;
+        pendingRetryItems = [];
+        usedMediaUrls.clear();
+        refreshRetryUI();
+
+        // Concurrency: force a single worker when doing a "refresh URLs" retry
+        const presetWorkers = SPEED_PRESETS[speedIdx].workers;
+        const effectiveWorkers = refreshUrls ? 1 : presetWorkers;
 
         const word = getContentWord();
         let logParts = [`Downloading ${totalToDownload} ${word}`];
         if (saveTxt)   logParts.push('+TXT');
         if (saveJSON)  logParts.push('+JSON');
+        if (refreshUrls) logParts.push('(refresh URLs)');
         if (!saveMedia) logParts = [`Processing ${totalToDownload} ${word} (no media)`];
         log(logParts.join(' ') + '…');
 
@@ -1176,19 +1460,74 @@
                 let mediaOk = true;
 
                 if (saveMedia) {
-                    const url = await getDownloadUrl(item);
-                    if (!url) {
+                    const primaryUrl = await getDownloadUrl(item);
+                    let media = await fetchValidatedMedia(item, primaryUrl, ext, refreshUrls);
+                    let url = media.url;
+                    if (media.reason === 'no_url') {
                         failedCount++;
                         log(`No URL: ${item.genId || item.postId}`);
                         updateDownloadProgress(dlStart);
                         continue;
                     }
+                    if (media.reason === 'fetch_failed') {
+                        failedCount++;
+                        log(`Fetch failed: ${item.genId || item.postId}`);
+                        updateDownloadProgress(dlStart);
+                        continue;
+                    }
+                    if (media.reason === 'stale_url') {
+                        failedCount++;
+                        log(`Rejected stale URL: ${item.genId || item.postId}`);
+                        updateDownloadProgress(dlStart);
+                        continue;
+                    }
+                    if (refreshUrls && media.reason === 'low_res') {
+                        log('Primary URL was still low-res, trying detail view refresh…');
+                        const detailUrl = await refreshDownloadUrl(item, true);
+                        media = await fetchValidatedMedia(item, detailUrl, ext, true);
+                        url = media.url;
+                    }
+                    if (media.reason === 'stale_url') {
+                        failedCount++;
+                        log(`Rejected stale detail URL: ${item.genId || item.postId}`);
+                        updateDownloadProgress(dlStart);
+                        continue;
+                    }
+                    if (ext === '.mp4' && media.reason === 'low_res') {
+                            failedCount++;
+                            lastLowResInfo = {
+                                id: item.genId || item.postId,
+                                filename: base + ext,
+                                actualWidth: media.meta?.width || 0,
+                                actualHeight: media.meta?.height || 0,
+                                expected: getVideoResolutionFloor(item, media.meta),
+                                browserWidth: media.remoteMeta?.width || 0,
+                                browserHeight: media.remoteMeta?.height || 0,
+                                rawUrl: refreshUrls ? url : '',
+                            };
+                            lastHaltReason = media.remoteMeta && isVideoFullResolution(item, media.remoteMeta)
+                                ? `Fetch mismatch: browser probe saw ${media.remoteMeta.width}x${media.remoteMeta.height}, fetch got ${lastLowResInfo.actualWidth}x${lastLowResInfo.actualHeight}`
+                                : `Low-res video detected (${lastLowResInfo.actualWidth}x${lastLowResInfo.actualHeight})`;
+                            pendingRetryItems = [item, ...items.slice(i + 1)];
+                            stopRequested = true;
+                            log(`HALT low-res: ${lastLowResInfo.filename} → ${lastLowResInfo.actualWidth}x${lastLowResInfo.actualHeight}`);
+                            if (refreshUrls && url) log(`HALT raw URL: ${url}`);
+                            updateDownloadProgress(dlStart);
+                            break;
+                    }
+                    if (media.reason === 'fetch_failed') {
+                        failedCount++;
+                        log(`Fetch failed: ${item.genId || item.postId}`);
+                        updateDownloadProgress(dlStart);
+                        continue;
+                    }
                     if (dlMethod === 'fs') {
                         const targetDir = await getSubDir(item);
-                        mediaOk = await downloadFileFS(url, base + ext, targetDir);
+                        mediaOk = await downloadFileFS(media.blob, base + ext, targetDir);
                     } else {
-                        mediaOk = await downloadFileGM(url, getSubfolderName(item), base + ext);
+                        mediaOk = await downloadFileGM(media.blob, getSubfolderName(item), base + ext);
                     }
+                    if (mediaOk) rememberMediaUrl(item, url);
                 }
 
                 if (saveTxt) {
@@ -1216,8 +1555,8 @@
 
         while (idx < items.length && !stopRequested) {
             const maxWorkers = dlMethod === 'gm'
-                ? Math.min(2, SPEED_PRESETS[speedIdx].workers)
-                : SPEED_PRESETS[speedIdx].workers;
+                ? Math.min(2, effectiveWorkers)
+                : effectiveWorkers;
             const conc = Math.min(items.length - idx, maxWorkers);
             await Promise.all(Array.from({ length: conc }, () => worker()));
         }
@@ -1225,8 +1564,14 @@
         isRunning = false;
 
         if (stopRequested) {
-            log(`Stopped — ${completedCount} saved, ${failedCount} failed`);
-            setState('ready');
+            if (pendingRetryItems.length && lastHaltReason) {
+                log(`Halted — ${lastHaltReason}. ${pendingRetryItems.length} item(s) queued for retry.`);
+                setState('ready');
+                setStatus(`${lastHaltReason}. Retry the remaining queue below.`);
+            } else {
+                log(`Stopped — ${completedCount} saved, ${failedCount} failed`);
+                setState('ready');
+            }
         } else {
             // Auto-export JSON manifest if enabled
             if (saveJSON) {
@@ -1234,6 +1579,10 @@
                 await exportJSON(true);
                 showToast('JSON manifest saved ✓');
             }
+            pendingRetryItems = [];
+            lastHaltReason = '';
+            lastLowResInfo = null;
+            refreshRetryUI();
             log(`All done — ${completedCount} saved${failedCount > 0 ? `, ${failedCount} failed` : ''} ✓`);
             showEndScreen(saveTxt, saveMedia, saveJSON);
         }
@@ -1309,6 +1658,29 @@
             done: '',
         }[s] || '');
         syncExpertSections();
+        refreshRetryUI();
+    }
+
+    function refreshRetryUI() {
+        const wrap = document.getElementById('sdl-retry-wrap');
+        const note = document.getElementById('sdl-retry-note');
+        const btn1 = document.getElementById('sdl-retry-remaining');
+        const btn2 = document.getElementById('sdl-retry-refresh');
+        const show = uiState === 'ready' && pendingRetryItems.length > 0;
+        if (wrap) wrap.style.display = show ? '' : 'none';
+        if (note) {
+            if (!show) {
+                note.innerHTML = '';
+            } else {
+                const baseMsg = show && lastLowResInfo
+                    ? `Halted on ${lastLowResInfo.actualWidth}x${lastLowResInfo.actualHeight} video. ${pendingRetryItems.length} item(s) remain.`
+                    : (show && lastHaltReason ? `${lastHaltReason}. ${pendingRetryItems.length} item(s) remain.` : '');
+                const instruct = `<div style="font-size:11px;color:rgba(255,255,255,0.32);margin-top:6px;line-height:1.25">Tip: For drafts open the video in the Sora detail view (click to open and close) before using “Refresh URLs + retry”. For profile/likes open the post first. The refresh retry runs with 1 worker to improve chances of capturing a fresh direct URL.</div>`;
+                note.innerHTML = baseMsg + instruct;
+            }
+        }
+        if (btn1) btn1.disabled = !show || isRunning;
+        if (btn2) btn2.disabled = !show || isRunning;
     }
 
     function syncExpertSections() {
@@ -1463,7 +1835,7 @@
         speedIdx = i;
         document.querySelectorAll('.sdl-speed-seg').forEach(el =>
             el.classList.toggle('active', parseInt(el.dataset.spd) === i));
-        const hints   = ['2 workers · 300 ms delay · safe', '4 workers · 150 ms delay · aggressive', '8 workers · 60 ms delay · ban risk!'];
+        const hints   = ['3 workers · 300 ms delay · safest', '2 workers · 150 ms delay · safer', '1 worker · 60 ms delay · most aggressive'];
         const classes = ['', 'warn', 'danger'];
         document.querySelectorAll('.sdl-speed-hint').forEach(h => {
             h.textContent = hints[i]; h.className = 'sdl-speed-hint ' + classes[i];
@@ -1897,6 +2269,13 @@
 .sdl-done-stat-ok .sdl-done-stat-n { color:#34d399; }
 .sdl-done-stat-err .sdl-done-stat-n { color:#f87171; }
 .sdl-done-stat-sep { width:1px; height:14px; background:rgba(255,255,255,0.09); }
+.sdl-retry-wrap {
+  margin-bottom:10px; padding:10px 11px; border-radius:10px;
+  background:rgba(248,113,113,0.08); border:0.5px solid rgba(248,113,113,0.18);
+}
+.sdl-retry-note { font-size:10.5px; color:rgba(255,255,255,0.68); line-height:1.55; margin-bottom:8px; }
+.sdl-retry-actions { display:flex; gap:8px; }
+.sdl-retry-actions .sdl-btn { margin-bottom:0; flex:1; }
 .sdl-done-filters {
   margin-bottom:12px; padding:8px 11px; border-radius:9px;
   background:rgba(99,102,241,0.07); border:0.5px solid rgba(99,102,241,0.2);
@@ -2075,6 +2454,13 @@
     <div id="sdl-counter-pill">&#x2014;</div>
     <button class="sdl-btn sdl-btn-primary"   id="sdl-dl"     disabled>Download All</button>
     <button class="sdl-btn sdl-btn-secondary" id="sdl-rescan">&#x21ba;&#x2002;Rescan</button>
+    <div id="sdl-retry-wrap" class="sdl-retry-wrap" style="display:none">
+      <div id="sdl-retry-note" class="sdl-retry-note"></div>
+      <div class="sdl-retry-actions">
+        <button class="sdl-btn sdl-btn-secondary" id="sdl-retry-remaining">Retry remaining</button>
+        <button class="sdl-btn sdl-btn-secondary" id="sdl-retry-refresh">Refresh URLs + retry</button>
+      </div>
+    </div>
 
     <!-- Filter disclosure — more prominent -->
     <div class="sdl-disc" id="sdl-filter-disc">
@@ -2196,7 +2582,7 @@
           <span class="s-icon">&#x25c9;</span><span class="s-lbl">Very fast</span><span class="s-risk">Ban risk!</span>
         </div>
       </div>
-      <div class="sdl-speed-hint">2 workers · 300 ms delay · safe</div>
+    <div class="sdl-speed-hint">3 workers · 300 ms delay · safest</div>
     </div>
     <button class="sdl-btn sdl-btn-stop" id="sdl-stop-dl">Stop</button>
   </div>
@@ -2357,9 +2743,12 @@
         document.getElementById('sdl-stop-scan').addEventListener('click', stopAll);
         document.getElementById('sdl-stop-dl').addEventListener('click',   stopAll);
         document.getElementById('sdl-dl').addEventListener('click',        startDownload);
+        document.getElementById('sdl-retry-remaining').addEventListener('click', () => retryPendingDownloads(false));
+        document.getElementById('sdl-retry-refresh').addEventListener('click',   () => retryPendingDownloads(true));
 
         document.getElementById('sdl-rescan').addEventListener('click', () => {
             collected.clear(); completedCount = 0; failedCount = 0;
+            pendingRetryItems = []; lastHaltReason = ''; lastLowResInfo = null; refreshRetryUI();
             setState('init'); log('Cleared. Ready for new scan.');
         });
 
@@ -2371,6 +2760,7 @@
 
         document.getElementById('sdl-clear').addEventListener('click', () => {
             collected.clear(); completedCount = 0; failedCount = 0; totalToDownload = 0;
+            pendingRetryItems = []; lastHaltReason = ''; lastLowResInfo = null; refreshRetryUI();
             resetFilters(); resetFilterInputs(); setState('init'); log('Cleared.');
         });
 
