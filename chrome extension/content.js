@@ -1,27 +1,24 @@
-// ==UserScript==
-// @name         SoraVault 2.0.1
-// @namespace    https://github.com/charyou/SoraVault
-// @version      2.0.1
-// @description  Bulk backup Sora content — images, videos, drafts, liked. API-driven, page-independent.
-// @author       Sebastian Haas (charyou)
-// @homepageURL  https://github.com/charyou/SoraVault
-// @supportURL   https://github.com/charyou/SoraVault/issues
-// @license      © 2026 Sebastian Haas – Personal use only; no redistribution or resale. See https://github.com/charyou/SoraVault/blob/main/LICENSE
-// @match        https://sora.chatgpt.com/*
-// @match        https://sora.com/*
-// @match        https://www.sora.com/*
-// @grant        GM_download
-// @grant        GM_xmlhttpRequest
-// @grant        unsafeWindow
-// @connect      videos.openai.com
-// @connect      sora.chatgpt.com
-// @connect      api.github.com
-// @connect      *
-// @run-at       document-start
-// ==/UserScript==
-
+/**
+ * SoraVault 2.0 — content.js
+ * Chrome Extension port of the Tampermonkey userscript.
+ *
+ * Runs in MAIN world so it can intercept window.fetch and window.XMLHttpRequest.
+ * Asset URLs are resolved via the bridge.js meta tag injection.
+ *
+ * Original: https://github.com/charyou/SoraVault
+ * Author: Sebastian Haas (charyou)
+ * License: © 2026 Sebastian Haas – Personal use only; no redistribution or resale.
+ */
 (function () {
     'use strict';
+
+    // =====================================================================
+    // CHROME EXTENSION — resolve asset URL via bridge meta tag
+    // =====================================================================
+    const _EXT_BASE = document.querySelector('meta[name="soravault-ext-base"]')?.content ?? '';
+    const LOGO_URL = _EXT_BASE
+        ? _EXT_BASE + 'assets/soravault-logo-square.png'
+        : `https://raw.githubusercontent.com/charyou/SoraVault/main/assets/soravault-logo-square.png`;
 
     // =====================================================================
     // CONFIG & RELEASE INFO
@@ -133,9 +130,9 @@
     // =====================================================================
     // FETCH INTERCEPT  — captures auth headers from Sora's own requests
     // =====================================================================
-    const _fetch = unsafeWindow.fetch.bind(unsafeWindow);
+    const _fetch = window.fetch.bind(window);
 
-    unsafeWindow.fetch = async function (...args) {
+    window.fetch = async function (...args) {
         const [resource, options] = args;
         const url  = typeof resource === 'string' ? resource : (resource?.url ?? '');
         const hdrs = options?.headers ?? {};
@@ -173,10 +170,10 @@
     };
 
     // XHR intercept (same auth capture)
-    const _xhrOpen = unsafeWindow.XMLHttpRequest.prototype.open;
-    const _xhrSend = unsafeWindow.XMLHttpRequest.prototype.send;
-    const _xhrSetH = unsafeWindow.XMLHttpRequest.prototype.setRequestHeader;
-    unsafeWindow.XMLHttpRequest.prototype.setRequestHeader = function (n, v) {
+    const _xhrOpen = window.XMLHttpRequest.prototype.open;
+    const _xhrSend = window.XMLHttpRequest.prototype.send;
+    const _xhrSetH = window.XMLHttpRequest.prototype.setRequestHeader;
+    window.XMLHttpRequest.prototype.setRequestHeader = function (n, v) {
         if (n?.toLowerCase() === 'oai-device-id') { oaiDeviceId = v; refreshAuthBadge(); }
         if (n?.toLowerCase() === 'oai-language')  oaiLanguage = v;
         if (this._sv_url && this._sv_url.includes('/backend/project_y/')) {
@@ -186,11 +183,11 @@
         }
         return _xhrSetH.apply(this, arguments);
     };
-    unsafeWindow.XMLHttpRequest.prototype.open = function (m, u, ...r) {
+    window.XMLHttpRequest.prototype.open = function (m, u, ...r) {
         this._sv_url = u || '';
         return _xhrOpen.apply(this, [m, u, ...r]);
     };
-    unsafeWindow.XMLHttpRequest.prototype.send = function (...a) {
+    window.XMLHttpRequest.prototype.send = function (...a) {
         if ((this._sv_url || '').includes('/list_tasks'))
             this.addEventListener('load', function () {
                 if (this.status === 200) try { ingestV1Page(JSON.parse(this.responseText), 'v1_library'); } catch(e) {}
@@ -307,14 +304,6 @@
         if (!Array.isArray(items)) return { hasMore: false, nextCursor: null };
         let added = 0;
 
-        const check = (v, label) => {
-            if (v && typeof v === 'string' && v.trim()) {
-                console.log('✅ Treffer:', label);
-                return v;
-            }
-            return undefined;
-        };
-
         items.forEach(item => {
             if (isDrafts) {
                 const genId = item.id ?? item.generation_id ?? '';
@@ -322,12 +311,9 @@
                 if (!genId || collected.has(genId)) return;
                 const date = item.created_at
                     ? new Date(item.created_at * 1000).toISOString().slice(0, 10) : '';
-                const dlUrl = check(item.encodings?.source?.path, "Encodings Source")
-                           ?? check(item.downloadable_url, "Downloadable URL")
-                           ?? check(item.download_urls?.watermark, "Watermark URL")
-                           ?? check(item.url, "Standard URL")
-                           ?? null;
-                console.log("Final ausgewählt (Draft):", dlUrl);
+                const dlUrl = item.downloadable_url
+                           ?? item.download_urls?.watermark
+                           ?? item.url ?? null;
                 const downloadUrl = dlUrl?.trim() ? dlUrl : null;
                 const thumb = item.encodings?.thumbnail;
                 const thumbUrl = thumb && typeof thumb === 'object' ? (thumb.url ?? null)
@@ -358,13 +344,10 @@
                 const encSrc = att.encodings?.source;
                 const encSrcUrl = encSrc && typeof encSrc === 'object' ? (encSrc.url ?? null)
                                 : (typeof encSrc === 'string' ? encSrc : null);
-                const attUrl = check(att.encodings?.source?.path, "Encodings Source")
-                            ?? check(att.downloadable_url, "Downloadable URL")
-                            ?? check(att.download_urls?.watermark, "Watermark URL")
-                            ?? check(encSrcUrl, "Encodings Source URL")
-                            ?? check(att.url, "Standard URL")
-                            ?? null;
-                console.log("Final ausgewählt (Profile):", attUrl);
+                const attUrl = att.downloadable_url
+                            ?? att.download_urls?.watermark
+                            ?? encSrcUrl
+                            ?? att.url ?? null;
                 const downloadUrl = attUrl?.trim() ? attUrl : null;
                 const gw = att.width ?? null, gh = att.height ?? null;
                 let ratio = null;
@@ -891,16 +874,12 @@
         }
 
         const url = URL.createObjectURL(blob);
-        if (typeof GM_download === 'function') {
-            GM_download({
-                url, name: filename, saveAs: true,
-                onload:  () => URL.revokeObjectURL(url),
-                onerror: () => URL.revokeObjectURL(url),
-            });
-        } else {
+        {
             const a = document.createElement('a');
             a.href = url; a.download = filename;
+            document.body.appendChild(a);
             a.click();
+            document.body.removeChild(a);
             setTimeout(() => URL.revokeObjectURL(url), 3000);
         }
         log(`JSON manifest saved: ${filename}`);
@@ -911,104 +890,62 @@
     // FILE SYSTEM HELPERS
     // =====================================================================
     async function downloadFileFS(url, filename, dir) {
-        let blob;
-
-        // 1) Try native fetch first
         try {
             const r = await _fetch(url);
-            if (r.ok) blob = await r.blob();
-            else log(`⚠ fetch ${r.status} for ${filename}`);
-        } catch(e) {
-            log(`⚠ fetch error for ${filename}: ${e.message}`);
-        }
-
-        // 2) Fallback: GM_xmlhttpRequest (bypasses CORS / VPN issues)
-        if (!blob && typeof GM_xmlhttpRequest === 'function') {
-            log(`↻ Retry via GM_xmlhttpRequest: ${filename}`);
-            try {
-                blob = await new Promise((resolve, reject) => {
-                    GM_xmlhttpRequest({
-                        method: 'GET', url,
-                        responseType: 'blob',
-                        onload:    (r) => r.status >= 200 && r.status < 300
-                                         ? resolve(r.response) : reject(new Error(`GM ${r.status}`)),
-                        onerror:   (e) => reject(new Error(e?.error || 'GM network error')),
-                        ontimeout: ()  => reject(new Error('GM timeout')),
-                    });
-                });
-            } catch(e) {
-                log(`⚠ GM fallback failed for ${filename}: ${e.message}`);
-            }
-        }
-
-        if (!blob) return false;
-
-        // 3) Write blob to chosen folder (auto-truncate on path-too-long errors)
-        for (let maxLen = filename.length; maxLen >= 40; maxLen = Math.min(maxLen - 30, Math.floor(maxLen * 0.7))) {
-            const fn = truncFilename(filename, maxLen);
-            try {
-                const fh = await dir.getFileHandle(fn, { create: true });
-                const w  = await fh.createWritable();
-                await w.write(blob); await w.close();
-                if (fn !== filename) log(`✂ Saved with shorter name: ${fn}`);
-                return true;
-            } catch(e) {
-                if (fn.length <= 40) {
-                    log(`⚠ Write failed for ${fn}: ${e.message}`);
-                    return false;
-                }
-                log(`↻ Path too long (${fn.length} chars), shortening filename…`);
-            }
-        }
-        return false;
-    }
-
-    function truncFilename(name, maxLen) {
-        if (name.length <= maxLen) return name;
-        const dot = name.lastIndexOf('.');
-        const ext = dot > 0 ? name.slice(dot) : '';
-        return name.slice(0, maxLen - ext.length).replace(/_+$/, '') + ext;
+            if (!r.ok) return false;
+            const blob = await r.blob();
+            const fh = await dir.getFileHandle(filename, { create: true });
+            const w  = await fh.createWritable();
+            await w.write(blob); await w.close();
+            return true;
+        } catch(e) { return false; }
     }
 
     async function downloadTextFileFS(content, filename, dir) {
-        for (let maxLen = filename.length; maxLen >= 40; maxLen = Math.min(maxLen - 30, Math.floor(maxLen * 0.7))) {
-            const fn = truncFilename(filename, maxLen);
-            try {
-                const fh = await dir.getFileHandle(fn, { create: true });
-                const w  = await fh.createWritable();
-                await w.write(content); await w.close();
-                return true;
-            } catch(e) {
-                if (fn.length <= 40) return false;
-            }
+        try {
+            const fh = await dir.getFileHandle(filename, { create: true });
+            const w  = await fh.createWritable();
+            await w.write(content); await w.close();
+            return true;
+        } catch(e) { return false; }
+    }
+
+    // Fallback download via anchor click (used when File System API unavailable)
+    async function downloadFileGM(url, subfolder, filename) {
+        try {
+            const r = await _fetch(url);
+            if (!r.ok) return false;
+            const blob    = await r.blob();
+            const blobUrl = URL.createObjectURL(blob);
+            const a       = document.createElement('a');
+            a.href        = blobUrl;
+            a.download    = filename; // subfolders not supported via anchor
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+            return true;
+        } catch(e) {
+            log('Anchor download error: ' + e.message);
+            return false;
         }
-        return false;
     }
 
-    function downloadFileGM(url, subfolder, filename) {
-        return new Promise(resolve => {
-            const name = subfolder ? `${subfolder}/${filename}` : filename;
-            GM_download({
-                url, name, saveAs: false,
-                onload:    ()  => resolve(true),
-                onerror:   (e) => { log(`GM err: ${e?.error || 'unknown'}`); resolve(false); },
-                ontimeout: ()  => { log('GM timeout'); resolve(false); },
-            });
-        });
-    }
-
-    function downloadTextFileGM(content, subfolder, filename) {
-        return new Promise(resolve => {
-            const name    = subfolder ? `${subfolder}/${filename}` : filename;
+    async function downloadTextFileGM(content, subfolder, filename) {
+        try {
             const blob    = new Blob([content], { type: 'text/plain;charset=utf-8' });
-            const dataUrl = URL.createObjectURL(blob);
-            GM_download({
-                url: dataUrl, name, saveAs: false,
-                onload:    () => { URL.revokeObjectURL(dataUrl); resolve(true); },
-                onerror:   () => { URL.revokeObjectURL(dataUrl); resolve(false); },
-                ontimeout: () => { URL.revokeObjectURL(dataUrl); resolve(false); },
-            });
-        });
+            const blobUrl = URL.createObjectURL(blob);
+            const a       = document.createElement('a');
+            a.href        = blobUrl;
+            a.download    = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+            return true;
+        } catch(e) {
+            return false;
+        }
     }
 
     // =====================================================================
@@ -1179,7 +1116,7 @@
         }
 
         const hasFS = typeof window.showDirectoryPicker === 'function';
-        const hasGM = typeof GM_download === 'function';
+        const hasGM = false; // Chrome extension: anchor download fallback only
 
         baseDir = null;
 
@@ -1194,10 +1131,10 @@
                 }
             } else if (hasGM) {
                 dlMethod = 'gm';
-                log('ℹ Folder picker not available — using Tampermonkey downloads');
+                log('ℹ Folder picker not available — using anchor download fallback');
             } else {
                 log('⚠ No download method available (use Chrome/Edge).');
-                setStatus('Chrome/Edge required for folder picker — see log');
+                setStatus('File System API unavailable — use Chrome 86+ — see log');
                 return;
             }
         }
@@ -1303,17 +1240,6 @@
                 await exportJSON(true);
                 showToast('JSON manifest saved ✓');
             }
-            // Save download log
-            const logEl = document.getElementById('sdl-log');
-            if (logEl && logEl.textContent.trim()) {
-                const logFilename = `SoraVault_log_${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
-                if (dlMethod === 'fs' && baseDir) {
-                    await downloadTextFileFS(logEl.textContent, logFilename, baseDir);
-                } else if (dlMethod === 'gm') {
-                    await downloadTextFileGM(logEl.textContent, null, logFilename);
-                }
-                log('Download log saved ✓');
-            }
             log(`All done — ${completedCount} saved${failedCount > 0 ? `, ${failedCount} failed` : ''} ✓`);
             showEndScreen(saveTxt, saveMedia, saveJSON);
         }
@@ -1384,7 +1310,7 @@
             scanning:    'API scan running — stop anytime to download what\'s found',
             ready:       '',
             downloading: dlMethod === 'gm'
-                ? 'Saving via Tampermonkey → default Downloads folder'
+                ? 'Saving via browser download → default Downloads folder'
                 : 'Saving files to your folder…',
             done: '',
         }[s] || '');
@@ -2022,7 +1948,7 @@
         p.innerHTML = `
 <div id="sdl-header">
   <img id="sdl-logo"
-       src="https://raw.githubusercontent.com/${GITHUB_REPO}/main/assets/soravault-logo-square.png"
+       src="${LOGO_URL}"
        alt="SoraVault" referrerpolicy="no-referrer">
   <span id="sdl-logo-fb">🔐</span>
   <span id="sdl-title">SoraVault 2.0</span>
@@ -2101,7 +2027,7 @@
     <div id="sdl-src-note">Works from any Sora page · no scrolling needed</div>
     <button class="sdl-btn sdl-btn-primary" id="sdl-scan">Scan All</button>
     <div style="font-size:10px;color:rgba(255,255,255,0.16);text-align:center;margin-top:6px;line-height:1.5;">
-      Full support on Chrome &amp; Edge · other browsers use Tampermonkey fallback
+      Runs as a Chrome Extension · File System API enabled
     </div>
   </div>
 
@@ -2330,7 +2256,7 @@
     </div>
     <div style="font-size:9.5px;color:rgba(255,255,255,0.16);line-height:1.6;padding:0 0 4px">
       <strong style="color:rgba(255,255,255,0.25)">Chrome/Edge:</strong> folder picker — you choose where<br>
-      <strong style="color:rgba(255,255,255,0.25)">Firefox/other:</strong> Tampermonkey fallback → Downloads
+      <strong style="color:rgba(255,255,255,0.25)">Fallback:</strong> Browser anchor download → Downloads folder
     </div>
   </div>
 
