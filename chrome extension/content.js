@@ -304,6 +304,14 @@
         if (!Array.isArray(items)) return { hasMore: false, nextCursor: null };
         let added = 0;
 
+        const check = (v, label) => {
+            if (v && typeof v === 'string' && v.trim()) {
+                console.log('✅ Treffer:', label);
+                return v;
+            }
+            return undefined;
+        };
+
         items.forEach(item => {
             if (isDrafts) {
                 const genId = item.id ?? item.generation_id ?? '';
@@ -311,9 +319,12 @@
                 if (!genId || collected.has(genId)) return;
                 const date = item.created_at
                     ? new Date(item.created_at * 1000).toISOString().slice(0, 10) : '';
-                const dlUrl = item.downloadable_url
-                           ?? item.download_urls?.watermark
-                           ?? item.url ?? null;
+                const dlUrl = check(item.encodings?.source?.path, "Encodings Source")
+                           ?? check(item.downloadable_url, "Downloadable URL")
+                           ?? check(item.download_urls?.watermark, "Watermark URL")
+                           ?? check(item.url, "Standard URL")
+                           ?? null;
+                console.log("Final ausgewählt (Draft):", dlUrl);
                 const downloadUrl = dlUrl?.trim() ? dlUrl : null;
                 const thumb = item.encodings?.thumbnail;
                 const thumbUrl = thumb && typeof thumb === 'object' ? (thumb.url ?? null)
@@ -344,10 +355,13 @@
                 const encSrc = att.encodings?.source;
                 const encSrcUrl = encSrc && typeof encSrc === 'object' ? (encSrc.url ?? null)
                                 : (typeof encSrc === 'string' ? encSrc : null);
-                const attUrl = att.downloadable_url
-                            ?? att.download_urls?.watermark
-                            ?? encSrcUrl
-                            ?? att.url ?? null;
+                const attUrl = check(att.encodings?.source?.path, "Encodings Source")
+                            ?? check(att.downloadable_url, "Downloadable URL")
+                            ?? check(att.download_urls?.watermark, "Watermark URL")
+                            ?? check(encSrcUrl, "Encodings Source URL")
+                            ?? check(att.url, "Standard URL")
+                            ?? null;
+                console.log("Final ausgewählt (Profile):", attUrl);
                 const downloadUrl = attUrl?.trim() ? attUrl : null;
                 const gw = att.width ?? null, gh = att.height ?? null;
                 let ratio = null;
@@ -890,24 +904,56 @@
     // FILE SYSTEM HELPERS
     // =====================================================================
     async function downloadFileFS(url, filename, dir) {
+        let blob;
+        // 1) Try native fetch first
         try {
             const r = await _fetch(url);
-            if (!r.ok) return false;
-            const blob = await r.blob();
-            const fh = await dir.getFileHandle(filename, { create: true });
-            const w  = await fh.createWritable();
-            await w.write(blob); await w.close();
-            return true;
-        } catch(e) { return false; }
+            if (r.ok) blob = await r.blob();
+            else log(`⚠ fetch ${r.status} for ${filename}`);
+        } catch(e) {
+            log(`⚠ fetch error for ${filename}: ${e.message}`);
+        }
+        if (!blob) return false;
+        // 2) Write blob to chosen folder (auto-truncate on path-too-long errors)
+        for (let maxLen = filename.length; maxLen >= 40; maxLen = Math.min(maxLen - 30, Math.floor(maxLen * 0.7))) {
+            const fn = truncFilename(filename, maxLen);
+            try {
+                const fh = await dir.getFileHandle(fn, { create: true });
+                const w  = await fh.createWritable();
+                await w.write(blob); await w.close();
+                if (fn !== filename) log(`✂ Saved with shorter name: ${fn}`);
+                return true;
+            } catch(e) {
+                if (fn.length <= 40) {
+                    log(`⚠ Write failed for ${fn}: ${e.message}`);
+                    return false;
+                }
+                log(`↻ Path too long (${fn.length} chars), shortening filename…`);
+            }
+        }
+        return false;
+    }
+
+    function truncFilename(name, maxLen) {
+        if (name.length <= maxLen) return name;
+        const dot = name.lastIndexOf('.');
+        const ext = dot > 0 ? name.slice(dot) : '';
+        return name.slice(0, maxLen - ext.length).replace(/_+$/, '') + ext;
     }
 
     async function downloadTextFileFS(content, filename, dir) {
-        try {
-            const fh = await dir.getFileHandle(filename, { create: true });
-            const w  = await fh.createWritable();
-            await w.write(content); await w.close();
-            return true;
-        } catch(e) { return false; }
+        for (let maxLen = filename.length; maxLen >= 40; maxLen = Math.min(maxLen - 30, Math.floor(maxLen * 0.7))) {
+            const fn = truncFilename(filename, maxLen);
+            try {
+                const fh = await dir.getFileHandle(fn, { create: true });
+                const w  = await fh.createWritable();
+                await w.write(content); await w.close();
+                return true;
+            } catch(e) {
+                if (fn.length <= 40) return false;
+            }
+        }
+        return false;
     }
 
     // Fallback download via anchor click (used when File System API unavailable)
