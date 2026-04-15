@@ -34,6 +34,7 @@
     const CFG = {
         PARALLEL_DOWNLOADS: 2,
         DOWNLOAD_TXT:       true,
+        SAVE_PRESETS:       true,
         FILENAME_TEMPLATE:  '{date}_{prompt}_{genId}',
         PROMPT_MAX_LEN:     80,
         BEARER_TOKEN:       '', // <-- You can paste your "eyJ..." token here if you want to hardcode it
@@ -43,22 +44,36 @@
     // SCAN SOURCES  — single source of truth for all source-aware logic
     // =====================================================================
     const SCAN_SOURCES = [
-        { id: 'v1_library', icon: '📷', label: 'Library',  sub: 'V1 image library',    group: 'v1' },
-        { id: 'v1_liked',   icon: '♡',  label: 'Likes',    sub: 'V1 favorites',         group: 'v1' },
-        { id: 'v2_profile', icon: '🎬', label: 'Videos',   sub: 'V2 published posts',   group: 'v2' },
-        { id: 'v2_drafts',  icon: '📋', label: 'Drafts',   sub: 'V2 all generated',     group: 'v2' },
-        { id: 'v2_liked',   icon: '♡',  label: 'Liked',    sub: 'V2 liked videos',      group: 'v2' },
+        { id: 'v1_library',   icon: '📷', label: 'Library',   sub: 'V1 image library',      group: 'v1' },
+        { id: 'v1_liked',     icon: '♡',  label: 'Likes',     sub: 'V1 explore likes',      group: 'v1' },
+        { id: 'v1_favorites', icon: '♡',  label: 'Favorites', sub: 'V1 library favorites',  group: 'v1', enabledByDefault: false },
+        { id: 'presets',      icon: '⚙',  label: 'Presets',   sub: 'Preset metadata export', group: 'v1', enabledByDefault: false },
+        { id: 'v2_profile',   icon: '🎬', label: 'Videos',    sub: 'V2 published posts',     group: 'v2' },
+        { id: 'v2_drafts',    icon: '📋', label: 'Drafts',    sub: 'V2 all generated',       group: 'v2' },
+        { id: 'v2_liked',     icon: '♡',  label: 'Liked',     sub: 'V2 liked videos',        group: 'v2' },
     ];
 
     // Per-category subfolder names — keyed by source ID
     const SUBFOLDERS = {
-        v1_library: 'sora_v1_images',
-        v1_videos:  'sora_v1_videos',
-        v1_liked:   'sora_v1_liked',
-        v2_profile: 'sora_v2_profile',
-        v2_drafts:  'sora_v2_drafts',
-        v2_liked:   'sora_v2_liked',
+        v1_library:   'sora_v1_images',
+        v1_videos:    'sora_v1_videos',
+        v1_liked:     'sora_v1_liked',
+        v1_favorites: 'sora_v1_favorites',
+        presets:      'sora_presets',
+        v2_profile:   'sora_v2_profile',
+        v2_drafts:    'sora_v2_drafts',
+        v2_liked:     'sora_v2_liked',
     };
+
+    SCAN_SOURCES.splice(1, 0, {
+        id: 'v1_uploads',
+        icon: '\uD83D\uDCE4',
+        label: 'Uploads',
+        sub: 'V1 library uploads',
+        group: 'v1',
+        enabledByDefault: false,
+    });
+    SUBFOLDERS.v1_uploads = 'sora_v1_uploads';
 
     const SPEED_PRESETS = [
         { workers: 2, delay: 300 },
@@ -96,17 +111,32 @@
     let lastSaveTxt        = false;
     let lastSaveMedia      = true;
     let lastSaveJSON       = false;
+    let lastSavePresets    = false;
     let lastFilterSnap     = [];
     let dlMethod           = 'fs';
     let baseDir            = null;
     let cachedUserId       = null;
+    let v1FavoritesEndpoint = '/backend/collections/favorites/generations?limit=10';
+    let v1FavoritesPageParam = 'after';
+    const V1_UPLOADS_CANDIDATES = [
+        '/backend/collections/uploads/generations?limit=10',
+        '/backend/uploads?limit=20',
+        '/backend/library/uploads?limit=20',
+        '/backend/collections/uploads?limit=10',
+    ];
+    let v1UploadsEndpoint  = V1_UPLOADS_CANDIDATES[0];
+    let v1UploadsPageParam = 'after';
+    let lastPresetsRaw     = null;
+    let lastPresetsSummary = { count: 0, groups: [] };
 
     // Geo-blocking
     let isV2Supported      = true;
     let geoCheckInitDone   = false;
 
     // Source enable/disable state — all enabled by default
-    const enabledSources = new Set(SCAN_SOURCES.map(s => s.id));
+    const enabledSources = new Set(
+        SCAN_SOURCES.filter(s => s.enabledByDefault !== false).map(s => s.id)
+    );
 
     // Per-source scan status
     const srcStatus = {};
@@ -115,7 +145,7 @@
     const filters = {
         keyword: '', ratios: new Set(), dateFrom: '', dateTo: '',
         qualities: new Set(), operations: new Set(), nItems: '', nDirection: 'last',
-        authorExclude: '',   // exclude by author (likes); empty = no filter
+        authorExclude: '',   // exclude by author (likes/favorites); empty = no filter
     };
 
     // =====================================================================
@@ -123,6 +153,348 @@
     // =====================================================================
     function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
     function gcd(a, b) { return b === 0 ? a : gcd(b, a % b); }
+
+    function isLibraryFavoritesPage() {
+        return location.pathname === '/library/favorites' ||
+               location.pathname.startsWith('/library/favorites/');
+    }
+
+    function isLibraryUploadsPage() {
+        return location.pathname === '/library/uploads' ||
+               location.pathname.startsWith('/library/uploads/');
+    }
+
+    function getV1CollectionItems(data) {
+        if (Array.isArray(data?.data)) return data.data;
+        if (Array.isArray(data?.items)) return data.items;
+        if (Array.isArray(data?.generations)) return data.generations;
+        return [];
+    }
+
+    function getV1CollectionPageState(data) {
+        const hasMore = data?.has_more === true || data?.hasMore === true;
+        const nextToken = data?.last_id ?? data?.next_cursor ?? data?.nextCursor ?? data?.cursor
+            ?? data?.before ?? data?.after ?? data?.next ?? null;
+        return { hasMore: hasMore && !!nextToken, nextToken };
+    }
+
+    function looksLikeV1CollectionPayload(data) {
+        const items = getV1CollectionItems(data);
+        if (!Array.isArray(items)) return false;
+        if (items.length === 0) {
+            return Boolean(data && (
+                Object.prototype.hasOwnProperty.call(data, 'has_more') ||
+                Object.prototype.hasOwnProperty.call(data, 'last_id') ||
+                Object.prototype.hasOwnProperty.call(data, 'next_cursor') ||
+                Object.prototype.hasOwnProperty.call(data, 'cursor') ||
+                Object.prototype.hasOwnProperty.call(data, 'before') ||
+                Object.prototype.hasOwnProperty.call(data, 'after') ||
+                Object.prototype.hasOwnProperty.call(data, 'next')
+            ));
+        }
+        return items.some(item => item && typeof item === 'object' &&
+            Object.prototype.hasOwnProperty.call(item, 'id') &&
+            (
+                Object.prototype.hasOwnProperty.call(item, 'url') ||
+                Object.prototype.hasOwnProperty.call(item, 'prompt') ||
+                Object.prototype.hasOwnProperty.call(item, 'task_id') ||
+                Object.prototype.hasOwnProperty.call(item, 'task_type')
+            )
+        );
+    }
+
+    function normalizePagedEndpoint(rawUrl) {
+        try {
+            const u = new URL(rawUrl, location.origin);
+            if (u.origin !== location.origin) return null;
+            u.searchParams.delete('after');
+            u.searchParams.delete('before');
+            u.searchParams.delete('cursor');
+            u.searchParams.delete('last_id');
+            u.searchParams.delete('next');
+            const qs = u.searchParams.toString();
+            return `${u.pathname}${qs ? `?${qs}` : ''}`;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function inferV1CollectionPageParam(url, data) {
+        try {
+            const u = new URL(url, location.origin);
+            if (u.searchParams.has('before')) return 'before';
+            if (u.searchParams.has('cursor')) return 'cursor';
+            if (u.searchParams.has('last_id')) return 'last_id';
+            if (u.searchParams.has('next')) return 'next';
+        } catch (e) {}
+        if (data?.before != null) return 'before';
+        if (data?.next_cursor != null || data?.nextCursor != null || data?.cursor != null) return 'cursor';
+        if (data?.last_id != null) return 'after';
+        if (data?.after != null) return 'after';
+        if (data?.next != null) return 'next';
+        return 'after';
+    }
+
+    function buildPagedUrl(baseEndpoint, token, pageParam = 'after') {
+        const u = new URL(baseEndpoint, location.origin);
+        if (token) u.searchParams.set(pageParam, token);
+        return u.toString();
+    }
+
+    function maybeCaptureV1FavoritesEndpoint(url, data) {
+        if (!url.includes('/backend/collections/favorites/generations')) return;
+        if (!looksLikeV1CollectionPayload(data)) return;
+
+        const base = normalizePagedEndpoint(url);
+        if (!base) return;
+
+        const pageParam = inferV1CollectionPageParam(url, data);
+        if (v1FavoritesEndpoint === base && v1FavoritesPageParam === pageParam) return;
+
+        v1FavoritesEndpoint = base;
+        v1FavoritesPageParam = pageParam;
+        log(`Detected Library Favorites API: ${base}`);
+        applyV1FavoritesAvailability();
+    }
+
+    function getUploadItems(data) {
+        if (Array.isArray(data)) return data;
+        if (Array.isArray(data?.uploads)) return data.uploads;
+        if (Array.isArray(data?.assets)) return data.assets;
+        if (Array.isArray(data?.files)) return data.files;
+        if (Array.isArray(data?.items)) return data.items;
+        if (Array.isArray(data?.data)) return data.data;
+        return [];
+    }
+
+    function normalizeMediaUrl(url) {
+        return typeof url === 'string' ? url.replace(/&amp;/g, '&') : null;
+    }
+
+    function extractUploadUrl(item) {
+        return normalizeMediaUrl(
+            item?.download_url ??
+            item?.downloadable_url ??
+            item?.downloadUrl ??
+            item?.original_url ??
+            item?.originalUrl ??
+            item?.file_url ??
+            item?.fileUrl ??
+            item?.source_url ??
+            item?.sourceUrl ??
+            item?.signed_url ??
+            item?.signedUrl ??
+            item?.storage_url ??
+            item?.storageUrl ??
+            item?.download_urls?.no_watermark ??
+            item?.download_urls?.watermark ??
+            item?.asset?.url ??
+            item?.image?.url ??
+            item?.video?.url ??
+            item?.url ??
+            item?.preview_url ??
+            item?.previewUrl ??
+            item?.thumbnail_url ??
+            item?.thumbnailUrl ??
+            item?.image_url ??
+            item?.video_url ??
+            null
+        );
+    }
+
+    function extractUploadFilename(item, url) {
+        const direct = item?.original_filename ?? item?.originalFilename ?? item?.file_name
+            ?? item?.filename ?? item?.name ?? item?.title ?? null;
+        if (direct) return String(direct);
+        if (!url) return null;
+        try {
+            const pathname = new URL(url, location.origin).pathname;
+            const name = pathname.split('/').pop();
+            return name ? decodeURIComponent(name) : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function extractUploadMimeType(item) {
+        return item?.mime_type ?? item?.mimeType ?? item?.content_type ?? item?.contentType
+            ?? item?.media_type ?? item?.mediaType ?? item?.file_type ?? item?.fileType
+            ?? item?.asset_type ?? item?.assetType ?? item?.type ?? null;
+    }
+
+    function inferIsVideoUpload(item, url, mimeType) {
+        const kind = String(
+            item?.task_type ?? item?.taskType ?? item?.kind ?? item?.asset_type ?? item?.assetType ?? item?.type ?? ''
+        ).toLowerCase();
+        if (kind.includes('video') || kind.includes('movie') || kind.includes('clip')) return true;
+        if (item?.n_frames != null && Number(item.n_frames) > 1) return true;
+        const mime = String(mimeType ?? '').toLowerCase();
+        if (mime.startsWith('video/')) return true;
+        return /\.(mp4|mov|webm|m4v|avi|mkv)(?:$|[?#])/i.test(String(url ?? ''));
+    }
+
+    function looksLikeV1UploadsPayload(data) {
+        if (looksLikeV1CollectionPayload(data)) return true;
+        if (Array.isArray(data) && data.length === 0) return true;
+        const items = getUploadItems(data);
+        if (!Array.isArray(items)) return false;
+        if (items.length === 0) {
+            return Boolean(data && (
+                Array.isArray(data?.uploads) ||
+                Array.isArray(data?.assets) ||
+                Array.isArray(data?.files) ||
+                Array.isArray(data?.items) ||
+                Array.isArray(data?.data) ||
+                Object.prototype.hasOwnProperty.call(data, 'has_more') ||
+                Object.prototype.hasOwnProperty.call(data, 'last_id') ||
+                Object.prototype.hasOwnProperty.call(data, 'next_cursor') ||
+                Object.prototype.hasOwnProperty.call(data, 'cursor') ||
+                Object.prototype.hasOwnProperty.call(data, 'before') ||
+                Object.prototype.hasOwnProperty.call(data, 'after') ||
+                Object.prototype.hasOwnProperty.call(data, 'next')
+            ));
+        }
+        return items.some(item => item && typeof item === 'object' &&
+            (item.id != null || item.upload_id != null || item.asset_id != null || item.file_id != null || item.slug != null || item.uuid != null) &&
+            !!extractUploadUrl(item)
+        );
+    }
+
+    function maybeCaptureV1UploadsEndpoint(url, data) {
+        const lower = String(url ?? '').toLowerCase();
+        if (!lower.includes('/backend/')) return;
+        if (!lower.includes('upload')) return;
+        if (!looksLikeV1UploadsPayload(data)) return;
+
+        const base = normalizePagedEndpoint(url);
+        if (!base) return;
+
+        const pageParam = inferV1CollectionPageParam(url, data);
+        if (v1UploadsEndpoint === base && v1UploadsPageParam === pageParam) return;
+
+        v1UploadsEndpoint = base;
+        v1UploadsPageParam = pageParam;
+        log(`Detected Library Uploads API: ${base}`);
+    }
+
+    function normalizeIsoDate(value) {
+        if (value == null || value === '') return new Date().toISOString().slice(0, 10);
+        const n = typeof value === 'number' ? value : null;
+        const d = n != null
+            ? new Date(n < 1e12 ? n * 1000 : n)
+            : new Date(value);
+        return Number.isNaN(d.getTime()) ? new Date().toISOString().slice(0, 10) : d.toISOString().slice(0, 10);
+    }
+
+    function sanitizeId(value, fallback = 'item') {
+        const clean = String(value ?? fallback).replace(/[^\w.-]+/g, '_').replace(/^_+|_+$/g, '');
+        return clean || fallback;
+    }
+
+    function extractPresetEntries(data) {
+        const entries = [];
+        const seen = new Set();
+
+        function pushPreset(preset, group, index) {
+            if (!preset || typeof preset !== 'object') return;
+            const rawId = preset.id ?? preset.slug ?? preset.name ?? preset.title ?? `${group || 'preset'}_${index + 1}`;
+            const id = sanitizeId(rawId, `${group || 'preset'}_${index + 1}`);
+            const dedupe = `${group || ''}:${id}`;
+            if (seen.has(dedupe)) return;
+            seen.add(dedupe);
+            entries.push({ preset, group, index, id });
+        }
+
+        function pushList(list, group = null) {
+            if (!Array.isArray(list)) return;
+            list.forEach((preset, index) => pushPreset(preset, group, index));
+        }
+
+        if (Array.isArray(data)) {
+            pushList(data);
+            return entries;
+        }
+
+        pushList(data?.presets);
+        pushList(data?.items);
+        pushList(data?.data);
+
+        if (data && typeof data === 'object') {
+            Object.entries(data).forEach(([group, value]) => {
+                pushList(value, group);
+                if (value && typeof value === 'object') {
+                    pushList(value.presets, group);
+                    pushList(value.items, group);
+                    pushList(value.data, group);
+                }
+            });
+        }
+
+        return entries;
+    }
+
+    function ingestPresets(data) {
+        lastPresetsRaw = data;
+        const entries = extractPresetEntries(data);
+        const groups  = [...new Set(entries.map(e => e.group).filter(Boolean))].sort();
+        lastPresetsSummary = { count: entries.length, groups };
+
+        let added = 0;
+        if (entries.length === 0) {
+            const id = 'presets_bundle';
+            collected.set(id, {
+                mode: 'meta',
+                source: 'presets',
+                metaKind: 'presets_bundle',
+                genId: id,
+                taskId: '',
+                date: normalizeIsoDate(null),
+                prompt: 'Sora presets bundle',
+                title: 'Sora presets bundle',
+                presetCount: 0,
+                presetGroups: [],
+                _raw: data,
+            });
+            added = 1;
+        } else {
+            entries.forEach(({ preset, group, index, id }) => {
+                const key = `preset_${id}`;
+                if (collected.has(key)) return;
+
+                const title = preset.title ?? preset.name ?? preset.label ?? preset.slug ?? `Preset ${index + 1}`;
+                collected.set(key, {
+                    mode: 'meta',
+                    source: 'presets',
+                    metaKind: 'preset',
+                    genId: key,
+                    taskId: '',
+                    date: normalizeIsoDate(preset.updated_at ?? preset.updatedAt ?? preset.created_at ?? preset.createdAt),
+                    prompt: preset.prompt ?? preset.description ?? title,
+                    title,
+                    presetId: preset.id ?? null,
+                    presetSlug: preset.slug ?? null,
+                    presetGroup: group ?? preset.category ?? preset.group ?? preset.type ?? null,
+                    author: preset.author?.username ?? preset.user?.username ?? preset.created_by?.username ?? null,
+                    quality: preset.quality ?? null,
+                    operation: preset.operation ?? null,
+                    model: preset.model ?? null,
+                    _raw: preset,
+                });
+                added++;
+            });
+        }
+
+        if (added > 0) {
+            log(`+${added} preset${added !== 1 ? 's' : ''} → ${collected.size} total`);
+            refreshScanCount();
+        }
+
+        return { added, count: entries.length, groups };
+    }
+
+    function isPresetItem(item) {
+        return item?.source === 'presets';
+    }
 
     function shutdownDaysDelta() {
         const now  = new Date();
@@ -168,6 +540,10 @@
                 response.clone().json().then(d => ingestV2Page(d, url, 'v2_profile')).catch(() => {});
             else if (url.includes('/backend/project_y/profile/drafts/v2'))
                 response.clone().json().then(d => ingestV2Page(d, url, 'v2_drafts')).catch(() => {});
+            else if (url.includes('/backend/collections/favorites/generations'))
+                response.clone().json().then(d => maybeCaptureV1FavoritesEndpoint(url, d)).catch(() => {});
+            else if (url.toLowerCase().includes('upload'))
+                response.clone().json().then(d => maybeCaptureV1UploadsEndpoint(url, d)).catch(() => {});
         }
         return response;
     };
@@ -194,6 +570,14 @@
         if ((this._sv_url || '').includes('/list_tasks'))
             this.addEventListener('load', function () {
                 if (this.status === 200) try { ingestV1Page(JSON.parse(this.responseText), 'v1_library'); } catch(e) {}
+            });
+        if ((this._sv_url || '').includes('/backend/collections/favorites/generations'))
+            this.addEventListener('load', function () {
+                if (this.status === 200) try { maybeCaptureV1FavoritesEndpoint(this._sv_url || '', JSON.parse(this.responseText)); } catch(e) {}
+            });
+        if ((this._sv_url || '').toLowerCase().includes('upload'))
+            this.addEventListener('load', function () {
+                if (this.status === 200) try { maybeCaptureV1UploadsEndpoint(this._sv_url || '', JSON.parse(this.responseText)); } catch(e) {}
             });
         return _xhrSend.apply(this, a);
     };
@@ -243,11 +627,11 @@
     }
 
     // =====================================================================
-    // DATA INGESTION — V1 Liked
+    // DATA INGESTION — V1 COLLECTIONS
     // =====================================================================
-    function ingestV1LikedPage(data) {
-        const items = data?.data;
-        if (!Array.isArray(items)) return { hasMore: false, lastId: null };
+    function ingestV1CollectionPage(data, sourceId = 'v1_liked') {
+        const items = getV1CollectionItems(data);
+        if (!Array.isArray(items)) return { hasMore: false, nextToken: null };
 
         let added = 0;
         items.forEach(gen => {
@@ -268,7 +652,7 @@
             const author   = gen.user?.username ?? null;
 
             collected.set(genId, {
-                mode: 'v1', source: 'v1_liked', genId,
+                mode: 'v1', source: sourceId, genId,
                 taskId:    gen.task_id    ?? '',
                 date:      (gen.created_at ?? '').slice(0, 10),
                 prompt:    gen.prompt     ?? '',
@@ -289,16 +673,85 @@
             added++;
         });
 
-        if (added > 0) { log(`+${added} v1 liked → ${collected.size} total`); refreshScanCount(); }
+        if (added > 0) {
+            const kind = sourceId === 'v1_favorites' ? 'v1 favorites' : 'v1 likes';
+            log(`+${added} ${kind} → ${collected.size} total`);
+            refreshScanCount();
+        }
 
-        const hasMore = data.has_more === true;
-        const lastId  = data.last_id ?? null;
-        return { hasMore: hasMore && !!lastId, lastId };
+        const { hasMore, nextToken } = getV1CollectionPageState(data);
+        return { hasMore, nextToken };
     }
 
     // =====================================================================
     // DATA INGESTION — V2 (Videos / Profile + Drafts + Liked)
     // =====================================================================
+    function ingestV1UploadsPage(data) {
+        const items = getUploadItems(data);
+        if (!Array.isArray(items)) return { hasMore: false, nextToken: null };
+
+        let added = 0;
+        items.forEach((item, index) => {
+            const rawId = item?.id ?? item?.upload_id ?? item?.asset_id ?? item?.file_id ?? item?.slug ?? item?.uuid ?? `upload_${index + 1}`;
+            const genId = sanitizeId(rawId, `upload_${index + 1}`);
+            const key = `upload_${genId}`;
+            if (collected.has(key)) return;
+
+            const downloadUrl = extractUploadUrl(item);
+            if (!downloadUrl) return;
+
+            const previewUrl = normalizeMediaUrl(
+                item?.thumbnail_url ?? item?.thumbnailUrl ?? item?.preview_url ?? item?.previewUrl
+                ?? item?.poster_url ?? item?.posterUrl ?? item?.url ?? downloadUrl
+            );
+            const gw = item?.width ?? item?.metadata?.width ?? item?.dimensions?.width ?? item?.image?.width ?? item?.video?.width ?? null;
+            const gh = item?.height ?? item?.metadata?.height ?? item?.dimensions?.height ?? item?.image?.height ?? item?.video?.height ?? null;
+            let ratio = null;
+            if (gw && gh) { const g = gcd(gw, gh); ratio = `${gw/g}:${gh/g}`; }
+
+            const originalFilename = extractUploadFilename(item, downloadUrl);
+            const mimeType = extractUploadMimeType(item);
+            const isVideo = inferIsVideoUpload(item, downloadUrl, mimeType);
+            const title = item?.title ?? item?.name ?? null;
+            const prompt = item?.prompt ?? item?.caption ?? item?.description ?? title ?? originalFilename ?? `Upload ${index + 1}`;
+            const taskType = String(item?.task_type ?? item?.taskType ?? item?.asset_type ?? item?.assetType ?? mimeType ?? (isVideo ? 'video' : 'image')).toLowerCase();
+
+            collected.set(key, {
+                mode: 'v1',
+                source: 'v1_uploads',
+                genId,
+                taskId: '',
+                date: normalizeIsoDate(item?.created_at ?? item?.uploaded_at ?? item?.updated_at ?? item?.createdAt ?? item?.uploadedAt ?? item?.inserted_at),
+                prompt,
+                pngUrl: previewUrl,
+                downloadUrl,
+                width: gw,
+                height: gh,
+                ratio,
+                quality: null,
+                operation: item?.operation ?? null,
+                model: null,
+                seed: null,
+                taskType,
+                nVariants: 1,
+                isVideo,
+                title,
+                originalFilename,
+                mimeType,
+                _raw: item,
+            });
+            added++;
+        });
+
+        if (added > 0) {
+            log(`+${added} v1 uploads â†’ ${collected.size} total`);
+            refreshScanCount();
+        }
+
+        const { hasMore, nextToken } = getV1CollectionPageState(data);
+        return { hasMore, nextToken };
+    }
+
     function ingestV2Page(data, url, sourceId) {
         const isDrafts = sourceId === 'v2_drafts' ||
                          (!sourceId && url && url.includes('/profile/drafts/'));
@@ -613,6 +1066,20 @@
         updateScanButton();
     }
 
+    function applyV1FavoritesAvailability() {
+        const cb  = document.getElementById('sdl-src-cb-v1_favorites');
+        const row = document.getElementById('sdl-src-row-v1_favorites');
+        if (!cb || !row) return;
+
+        cb.disabled = false;
+        row.style.opacity = '';
+        row.title = '';
+        const tag = row.querySelector('.sdl-discovery-tag');
+        if (tag) tag.remove();
+
+        updateScanButton();
+    }
+
     // =====================================================================
     // API SCAN — FETCHERS
     // =====================================================================
@@ -639,7 +1106,7 @@
     }
 
     async function fetchAllV1Liked() {
-        log('── V1 Liked ──');
+        log('── V1 Likes ──');
         let afterId = null, hasMore = true, page = 0;
         while (hasMore && !stopRequested) {
             page++;
@@ -649,15 +1116,122 @@
             if (!r) { setSrcStatus('v1_liked', 'error'); return; }
             let data;
             try { data = await r.json(); }
-            catch(e) { log('V1 liked: JSON parse error'); setSrcStatus('v1_liked', 'error'); return; }
-            const result = ingestV1LikedPage(data);
+            catch(e) { log('V1 likes: JSON parse error'); setSrcStatus('v1_liked', 'error'); return; }
+            const result = ingestV1CollectionPage(data, 'v1_liked');
             hasMore = result.hasMore;
-            afterId = result.lastId;
-            log(`V1 liked p${page}: ${collected.size} items${hasMore ? '…' : ' ✓'}`);
-            if (hasMore && !afterId) { log('⚠ V1 liked: has_more but no last_id — stopping'); break; }
+            afterId = result.nextToken;
+            log(`V1 likes p${page}: ${collected.size} items${hasMore ? '…' : ' ✓'}`);
+            if (hasMore && !afterId) { log('⚠ V1 likes: has_more but no next token — stopping'); break; }
             if (hasMore) await sleep(50);
         }
         setSrcStatus('v1_liked', stopRequested ? 'skipped' : 'done');
+    }
+
+    async function fetchAllV1Favorites() {
+        log('── V1 Library Favorites ──');
+        let nextToken = null, hasMore = true, page = 0;
+        while (hasMore && !stopRequested) {
+            page++;
+            const url = buildPagedUrl(v1FavoritesEndpoint, nextToken, v1FavoritesPageParam);
+            const r   = await fetchWithRetry(url, { credentials: 'include', headers: buildHeaders() });
+            if (!r) { setSrcStatus('v1_favorites', 'error'); return; }
+            let data;
+            try { data = await r.json(); }
+            catch(e) { log('V1 favorites: JSON parse error'); setSrcStatus('v1_favorites', 'error'); return; }
+
+            maybeCaptureV1FavoritesEndpoint(url, data);
+            const result = ingestV1CollectionPage(data, 'v1_favorites');
+            hasMore = result.hasMore;
+            nextToken = result.nextToken;
+            log(`V1 favorites p${page}: ${collected.size} items${hasMore ? '…' : ' ✓'}`);
+            if (hasMore && !nextToken) { log('⚠ V1 favorites: has_more but no next token — stopping'); break; }
+            if (hasMore) await sleep(50);
+        }
+        setSrcStatus('v1_favorites', stopRequested ? 'skipped' : 'done');
+    }
+
+    async function probeV1UploadsEndpoint() {
+        const candidates = [
+            { endpoint: v1UploadsEndpoint, pageParam: v1UploadsPageParam },
+            ...V1_UPLOADS_CANDIDATES.map(endpoint => ({ endpoint, pageParam: 'after' })),
+        ];
+        const seen = new Set();
+
+        for (const candidate of candidates) {
+            const endpoint = candidate?.endpoint;
+            const pageParam = candidate?.pageParam ?? 'after';
+            const key = `${endpoint}|${pageParam}`;
+            if (!endpoint || seen.has(key)) continue;
+            seen.add(key);
+
+            const url = buildPagedUrl(endpoint, null, pageParam);
+            try {
+                const r = await _fetch(url, { credentials: 'include', headers: buildHeaders() });
+                if (!r.ok) continue;
+                const data = await r.json();
+                if (!looksLikeV1UploadsPayload(data)) continue;
+                maybeCaptureV1UploadsEndpoint(url, data);
+                return data;
+            } catch (e) {}
+        }
+        return null;
+    }
+
+    async function fetchAllV1Uploads() {
+        log('â”€â”€ V1 Library Uploads â”€â”€');
+        let data = await probeV1UploadsEndpoint();
+        if (!data) {
+            const hint = isLibraryUploadsPage()
+                ? 'Refresh /library/uploads once, let the grid load, then rescan.'
+                : 'Open /library/uploads once, let the grid load, then rescan.';
+            log(`V1 uploads: could not locate uploads API. ${hint}`);
+            setSrcStatus('v1_uploads', 'error');
+            return;
+        }
+
+        let nextToken = null, hasMore = true, page = 0;
+        while (hasMore && !stopRequested) {
+            page++;
+            if (!looksLikeV1UploadsPayload(data)) {
+                log('V1 uploads: unexpected payload');
+                setSrcStatus('v1_uploads', 'error');
+                return;
+            }
+
+            const result = ingestV1UploadsPage(data);
+            hasMore = result.hasMore;
+            nextToken = result.nextToken;
+            log(`V1 uploads p${page}: ${collected.size} items${hasMore ? 'â€¦' : ' âœ“'}`);
+            if (hasMore && !nextToken) { log('âš  V1 uploads: has_more but no next token â€” stopping'); break; }
+            if (!hasMore || stopRequested) break;
+
+            const url = buildPagedUrl(v1UploadsEndpoint, nextToken, v1UploadsPageParam);
+            const r   = await fetchWithRetry(url, { credentials: 'include', headers: buildHeaders() });
+            if (!r) { setSrcStatus('v1_uploads', 'error'); return; }
+            try { data = await r.json(); }
+            catch(e) { log('V1 uploads: JSON parse error'); setSrcStatus('v1_uploads', 'error'); return; }
+            maybeCaptureV1UploadsEndpoint(url, data);
+            if (hasMore) await sleep(50);
+        }
+        setSrcStatus('v1_uploads', stopRequested ? 'skipped' : 'done');
+    }
+
+    async function fetchPresets() {
+        log('── Presets ──');
+        const r = await fetchWithRetry(
+            `${location.origin}/backend/presets`,
+            { credentials: 'include', headers: buildHeaders() }
+        );
+        if (!r) { setSrcStatus('presets', 'error'); return; }
+
+        let data;
+        try { data = await r.json(); }
+        catch (e) { log('Presets: JSON parse error'); setSrcStatus('presets', 'error'); return; }
+
+        const result = ingestPresets(data);
+        const groupText = result.groups.length ? ` · ${result.groups.join(', ')}` : '';
+        log(`Presets: ${result.count || result.added} captured${groupText}`);
+        setSrcStatus('presets', stopRequested ? 'skipped' : 'done');
     }
 
     async function fetchAllV2(baseEndpoint, sourceId) {
@@ -728,7 +1302,10 @@
 
         const FETCH_MAP = {
             v1_library: fetchAllV1,
+            v1_uploads: fetchAllV1Uploads,
             v1_liked:   fetchAllV1Liked,
+            v1_favorites: fetchAllV1Favorites,
+            presets:    fetchPresets,
             v2_profile: () => fetchAllV2('/backend/project_y/profile_feed/me?limit=8&cut=nf2', 'v2_profile'),
             v2_drafts:  () => fetchAllV2('/backend/project_y/profile/drafts/v2?limit=15', 'v2_drafts'),
             v2_liked:   fetchAllV2Liked,
@@ -749,8 +1326,8 @@
     // DOWNLOAD HELPERS
     // =====================================================================
     async function getDownloadUrl(item) {
+        if (item.downloadUrl) return String(item.downloadUrl).replace(/&amp;/g, '&');
         if (item.mode === 'v2') {
-            if (item.downloadUrl) return item.downloadUrl;
             if (item.postId) {
                 try {
                     const r = await _fetch(
@@ -792,15 +1369,54 @@
         return null;
     }
 
+    function inferExtFromName(value) {
+        const match = /\.([a-z0-9]{2,5})(?:$|[?#])/i.exec(String(value ?? ''));
+        return match ? `.${match[1].toLowerCase()}` : null;
+    }
+
+    function inferExtFromMime(mimeType) {
+        const mime = String(mimeType ?? '').toLowerCase();
+        if (!mime) return null;
+        const map = {
+            'image/jpeg': '.jpg',
+            'image/jpg': '.jpg',
+            'image/png': '.png',
+            'image/webp': '.webp',
+            'image/gif': '.gif',
+            'image/heic': '.heic',
+            'image/heif': '.heif',
+            'video/mp4': '.mp4',
+            'video/quicktime': '.mov',
+            'video/webm': '.webm',
+            'video/x-msvideo': '.avi',
+            'video/x-matroska': '.mkv',
+        };
+        return map[mime] ?? null;
+    }
+
+    function inferUploadFileExt(item) {
+        return inferExtFromName(item?.originalFilename)
+            ?? inferExtFromName(item?.title)
+            ?? inferExtFromName(item?.downloadUrl)
+            ?? inferExtFromName(item?.pngUrl)
+            ?? inferExtFromMime(item?.mimeType)
+            ?? (item?.isVideo ? '.mp4' : '.png');
+    }
+
     function getSubfolderName(item) {
+        if (isPresetItem(item)) return SUBFOLDERS.presets;
         if (item.mode === 'v1') {
+            if (item.source === 'v1_uploads') return SUBFOLDERS.v1_uploads;
             if (item.source === 'v1_liked') return SUBFOLDERS.v1_liked;
+            if (item.source === 'v1_favorites') return SUBFOLDERS.v1_favorites;
             return item.isVideo ? SUBFOLDERS.v1_videos : SUBFOLDERS.v1_library;
         }
         return SUBFOLDERS[item.source] ?? SUBFOLDERS.v2_profile;
     }
 
     function getFileExt(item) {
+        if (isPresetItem(item)) return '.json';
+        if (item.source === 'v1_uploads') return inferUploadFileExt(item);
         if (item.mode === 'v2')  return '.mp4';
         if (item.isVideo)        return '.mp4';
         return '.png';
@@ -819,6 +1435,17 @@
     function buildBase(item) {
         const tpl = readConfig('FILENAME_TEMPLATE') || CFG.FILENAME_TEMPLATE;
         const mx  = parseInt(readConfig('PROMPT_MAX_LEN')) || CFG.PROMPT_MAX_LEN;
+        if (isPresetItem(item)) {
+            const label = item.title ?? item.prompt ?? item.presetSlug ?? item.presetId ?? item.genId ?? 'preset';
+            const suffix = sanitizeId(item.presetSlug ?? item.presetId ?? item.genId ?? 'preset', 'preset');
+            return `${item.date || 'unknown'}_${slugify(label, mx)}_${suffix}`.replace(/_+/g, '_').replace(/^_|_$/g, '');
+        }
+        if (item.source === 'v1_uploads') {
+            const label = String(item.originalFilename ?? item.title ?? item.prompt ?? item.genId ?? 'upload')
+                .replace(/\.[a-z0-9]{2,5}$/i, '');
+            const suffix = sanitizeId(item.genId ?? 'upload', 'upload');
+            return `${item.date || 'unknown'}_${slugify(label, mx)}_${suffix}`.replace(/_+/g, '_').replace(/^_|_$/g, '');
+        }
         return tpl
             .replace('{date}',      item.date        || 'unknown')
             .replace('{prompt}',    slugify(item.prompt || '', mx))
@@ -836,6 +1463,44 @@
     }
 
     function buildTxtContent(item) {
+        if (isPresetItem(item)) {
+            const raw = item._raw ?? {};
+            const keys = Object.keys(raw).sort();
+            const lines = [
+                `Source         : ${item.source || ''}`,
+                `Preset ID      : ${item.presetId ?? item.genId ?? ''}`,
+                `Slug           : ${item.presetSlug ?? ''}`,
+                `Name           : ${item.title ?? ''}`,
+                `Group          : ${item.presetGroup ?? ''}`,
+                `Date           : ${item.date || ''}`,
+            ];
+            if (item.author)    lines.push(`Author         : ${item.author}`);
+            if (item.quality)   lines.push(`Quality        : ${item.quality}`);
+            if (item.operation) lines.push(`Operation      : ${item.operation}`);
+            if (item.model)     lines.push(`Model          : ${item.model}`);
+            lines.push(`Raw keys       : ${keys.join(', ') || '(none)'}`);
+            lines.push('', '── Prompt ──────────────────────────────────────────────────', item.prompt || '(none)');
+            return lines.join('\n');
+        }
+
+        if (item.source === 'v1_uploads') {
+            const lines = [
+                `Source         : ${item.source || ''}`,
+                `Upload ID      : ${item.genId || ''}`,
+                `Date           : ${item.date || ''}`,
+            ];
+            if (item.title)            lines.push(`Title          : ${item.title}`);
+            if (item.originalFilename) lines.push(`Original name  : ${item.originalFilename}`);
+            if (item.mimeType)         lines.push(`MIME type      : ${item.mimeType}`);
+            if (item.width && item.height) {
+                lines.push(`Resolution     : ${item.width} x ${item.height} px`);
+                lines.push(`Aspect ratio   : ${item.ratio || '?'}`);
+            }
+            if (item.taskType) lines.push(`Type           : ${item.taskType}`);
+            lines.push('', 'Upload notes', item.prompt || '(none)');
+            return lines.join('\n');
+        }
+
         const lines = [
             `Source         : ${item.source || ''}`,
             `Generation ID  : ${item.genId || item.postId || ''}`,
@@ -905,6 +1570,34 @@
         }
         log(`JSON manifest saved: ${filename}`);
         if (!silent) showToast('JSON manifest saved ✓');
+    }
+
+    async function exportPresetsBundle(silent = false) {
+        if (!lastPresetsRaw) return false;
+
+        const json = JSON.stringify(lastPresetsRaw, null, 2);
+        const filename = `soravault_presets_bundle_${new Date().toISOString().slice(0, 10)}.json`;
+
+        if (baseDir) {
+            try {
+                let targetDir = baseDir;
+                try { targetDir = await baseDir.getDirectoryHandle(SUBFOLDERS.presets, { create: true }); } catch (e) {}
+                const ok = await downloadTextFileFS(json, filename, targetDir);
+                if (ok) {
+                    log(`Presets bundle saved: ${filename}`);
+                    if (!silent) showToast('Presets bundle saved ✓');
+                    return true;
+                }
+            } catch (e) {}
+        }
+
+        const ok = await downloadTextFileGM(json, SUBFOLDERS.presets, filename);
+        if (ok) {
+            log(`Presets bundle saved: ${filename}`);
+            if (!silent) showToast('Presets bundle saved ✓');
+            return true;
+        }
+        return false;
     }
 
     // =====================================================================
@@ -1130,6 +1823,8 @@
         isRunning = true; stopRequested = false;
         collected.clear(); completedCount = 0; failedCount = 0;
         cachedUserId = null;
+        lastPresetsRaw = null;
+        lastPresetsSummary = { count: 0, groups: [] };
         resetFilters();
 
         SCAN_SOURCES.forEach(s => setSrcStatus(s.id, enabledSources.has(s.id) ? 'pending' : 'idle'));
@@ -1172,8 +1867,14 @@
         const saveMedia = readConfigBool('SAVE_MEDIA', true);
         const saveTxt   = readConfigBool('DOWNLOAD_TXT', CFG.DOWNLOAD_TXT);
         const saveJSON  = readConfigBool('SAVE_JSON', false);
+        const savePresets = readConfigBool('SAVE_PRESETS', CFG.SAVE_PRESETS);
+        const hasPresetItems = items.some(isPresetItem);
+        const hasMediaItems = items.some(item => !isPresetItem(item));
+        const saveMediaFiles = saveMedia && hasMediaItems;
+        const savePresetFiles = savePresets && hasPresetItems;
+        const savePresetBundle = savePresetFiles && items.some(item => isPresetItem(item) && item.metaKind !== 'presets_bundle');
 
-        if (!saveMedia && !saveTxt && !saveJSON) {
+        if (!saveMediaFiles && !saveTxt && !saveJSON && !savePresetFiles) {
             showToast('Enable at least one output format ↑');
             return;
         }
@@ -1183,7 +1884,7 @@
 
         baseDir = null;
 
-        if (saveMedia || saveTxt) {
+        if (saveMediaFiles || saveTxt || savePresetFiles) {
             if (hasFS) {
                 try {
                     baseDir = await window.showDirectoryPicker({ mode: 'readwrite' });
@@ -1206,15 +1907,17 @@
         completedCount = 0; failedCount = 0;
         totalToDownload = items.length;
         lastSaveTxt    = saveTxt;
-        lastSaveMedia  = saveMedia;
+        lastSaveMedia  = saveMediaFiles;
         lastSaveJSON   = saveJSON;
+        lastSavePresets = savePresetFiles;
         lastFilterSnap = snapshotActiveFilters();
 
         const word = getContentWord();
         let logParts = [`Downloading ${totalToDownload} ${word}`];
         if (saveTxt)   logParts.push('+TXT');
         if (saveJSON)  logParts.push('+JSON');
-        if (!saveMedia) logParts = [`Processing ${totalToDownload} ${word} (no media)`];
+        if (savePresetFiles) logParts.push('+PRESETS');
+        if (!saveMediaFiles && !savePresetFiles) logParts = [`Processing ${totalToDownload} ${word} (no media)`];
         log(logParts.join(' ') + '…');
 
         const totalEl = document.getElementById('sdl-dl-total');
@@ -1243,8 +1946,17 @@
                 log(`[${i+1}/${totalToDownload}] ${base.slice(0, 55)}…`);
 
                 let mediaOk = true;
+                let presetOk = true;
 
-                if (saveMedia) {
+                if (isPresetItem(item) && savePresetFiles) {
+                    const json = JSON.stringify(item._raw ?? {}, null, 2);
+                    if (dlMethod === 'fs' && baseDir) {
+                        const targetDir = await getSubDir(item);
+                        presetOk = await downloadTextFileFS(json, base + '.json', targetDir);
+                    } else {
+                        presetOk = await downloadTextFileGM(json, getSubfolderName(item), base + '.json');
+                    }
+                } else if (!isPresetItem(item) && saveMediaFiles) {
                     const url = await getDownloadUrl(item);
                     if (!url) {
                         failedCount++;
@@ -1271,7 +1983,7 @@
                     }
                 }
 
-                if (saveMedia && !mediaOk) {
+                if ((isPresetItem(item) && savePresetFiles && !presetOk) || (!isPresetItem(item) && saveMediaFiles && !mediaOk)) {
                     failedCount++;
                     log(`Failed: ${item.genId || item.postId}`);
                 } else {
@@ -1297,6 +2009,10 @@
             log(`Stopped — ${completedCount} saved, ${failedCount} failed`);
             setState('ready');
         } else {
+            if (savePresetBundle) {
+                log('Saving presets bundle…');
+                await exportPresetsBundle(true);
+            }
             // Auto-export JSON manifest if enabled
             if (saveJSON) {
                 log('Saving JSON manifest…');
@@ -1315,7 +2031,7 @@
                 log('Download log saved ✓');
             }
             log(`All done — ${completedCount} saved${failedCount > 0 ? `, ${failedCount} failed` : ''} ✓`);
-            showEndScreen(saveTxt, saveMedia, saveJSON);
+            showEndScreen(saveTxt, saveMediaFiles, saveJSON, savePresetFiles);
         }
     }
 
@@ -1333,7 +2049,7 @@
         return `${total} second${total !== 1 ? 's' : ''}`;
     }
 
-    function showEndScreen(saveTxt, saveMedia, saveJSON) {
+    function showEndScreen(saveTxt, saveMedia, saveJSON, savePresets) {
         setState('done');
         const timeStr = computeTimeSaved(completedCount, saveTxt);
         const word    = getContentWord();
@@ -1351,6 +2067,7 @@
                 if (failedCount > 0) statItems.push(`<div class="sdl-done-stat sdl-done-stat-err"><span class="sdl-done-stat-n">${failedCount}</span><span>failed</span></div>`);
             }
             if (saveTxt)  statItems.push(`<div class="sdl-done-stat sdl-done-stat-ok"><span class="sdl-done-stat-n">✓</span><span>prompts</span></div>`);
+            if (savePresets) statItems.push(`<div class="sdl-done-stat sdl-done-stat-ok"><span class="sdl-done-stat-n">✓</span><span>presets</span></div>`);
             if (saveJSON) statItems.push(`<div class="sdl-done-stat sdl-done-stat-ok"><span class="sdl-done-stat-n">✓</span><span>manifest</span></div>`);
             statsEl.innerHTML = statItems.join('<div class="sdl-done-stat-sep"></div>');
         }
@@ -1442,9 +2159,12 @@
 
     function getContentWord() {
         const vals = [...collected.values()];
+        const hasMeta    = vals.some(i => i.mode === 'meta');
         const hasV2      = vals.some(i => i.mode === 'v2');
         const hasVideos  = vals.some(i => i.mode === 'v1' && i.isVideo);
         const hasImages  = vals.some(i => i.mode === 'v1' && !i.isVideo);
+        if (hasMeta && (hasV2 || hasVideos || hasImages)) return 'items';
+        if (hasMeta && !hasV2 && !hasVideos && !hasImages) return 'presets';
         if ((hasV2 || hasVideos) && hasImages) return 'items';
         if (hasV2 || hasVideos) return 'videos';
         return 'images';
@@ -2061,11 +2781,29 @@
           <span class="sdl-src-name">Library</span>
           <span class="sdl-src-sub">V1 image library</span>
         </label>
+        <label class="sdl-src-row" id="sdl-src-row-v1_uploads">
+          <input type="checkbox" id="sdl-src-cb-v1_uploads">
+          <span class="sdl-src-icon">&#x1F4E4;</span>
+          <span class="sdl-src-name">Uploads</span>
+          <span class="sdl-src-sub">V1 library uploads</span>
+        </label>
         <label class="sdl-src-row" id="sdl-src-row-v1_liked">
           <input type="checkbox" id="sdl-src-cb-v1_liked" checked>
           <span class="sdl-src-icon">♡</span>
           <span class="sdl-src-name">Likes</span>
-          <span class="sdl-src-sub">V1 favorites</span>
+          <span class="sdl-src-sub">V1 explore likes</span>
+        </label>
+        <label class="sdl-src-row" id="sdl-src-row-v1_favorites">
+          <input type="checkbox" id="sdl-src-cb-v1_favorites">
+          <span class="sdl-src-icon">♡</span>
+          <span class="sdl-src-name">Favorites</span>
+          <span class="sdl-src-sub">V1 library favorites</span>
+        </label>
+        <label class="sdl-src-row" id="sdl-src-row-presets">
+          <input type="checkbox" id="sdl-src-cb-presets">
+          <span class="sdl-src-icon">⚙</span>
+          <span class="sdl-src-name">Presets</span>
+          <span class="sdl-src-sub">Preset metadata export</span>
         </label>
       </div>
 
@@ -2150,6 +2888,14 @@
           <div class="sdl-toggle-thumb"></div>
         </label>
       </div>
+      <div class="sdl-export-row">
+        <span class="sdl-export-lbl">Save presets .json<span>raw preset files + full presets bundle</span></span>
+        <label class="sdl-toggle">
+          <input type="checkbox" id="sdl-cfg-SAVE_PRESETS" ${CFG.SAVE_PRESETS ? 'checked' : ''}>
+          <div class="sdl-toggle-track"></div>
+          <div class="sdl-toggle-thumb"></div>
+        </label>
+      </div>
     </div>
 
     <div id="sdl-counter-pill">&#x2014;</div>
@@ -2226,7 +2972,7 @@
 
       <!-- Author exclude (full width) -->
       <div class="sdl-f-sec">
-        <span class="sdl-f-lbl">Exclude author (likes only)</span>
+        <span class="sdl-f-lbl">Exclude author (likes/favorites)</span>
         <input class="sdl-f-inp" id="sdl-f-author" type="text" placeholder="exact username to exclude, case-insensitive">
       </div>
 
@@ -2322,8 +3068,11 @@
     <div class="sdl-sec-title first">Download folders (automatic)</div>
     <div style="font-size:10.5px;color:rgba(255,255,255,0.25);line-height:1.9;padding:2px 0 6px">
       📷 V1 Images  → <code style="color:rgba(255,255,255,0.38)">sora_v1_images</code><br>
+      📤 V1 Uploads → <code style="color:rgba(255,255,255,0.38)">sora_v1_uploads</code><br>
       🎬 V1 Videos  → <code style="color:rgba(255,255,255,0.38)">sora_v1_videos</code><br>
-      ♡  V1 Liked   → <code style="color:rgba(255,255,255,0.38)">sora_v1_liked</code><br>
+      ♡  V1 Likes  → <code style="color:rgba(255,255,255,0.38)">sora_v1_liked</code><br>
+      ♡  V1 Favorites → <code style="color:rgba(255,255,255,0.38)">sora_v1_favorites</code><br>
+      ⚙  Presets  → <code style="color:rgba(255,255,255,0.38)">sora_presets</code><br>
       🎬 V2 Profile → <code style="color:rgba(255,255,255,0.38)">sora_v2_profile</code><br>
       📋 V2 Drafts  → <code style="color:rgba(255,255,255,0.38)">sora_v2_drafts</code><br>
       ♡  V2 Liked   → <code style="color:rgba(255,255,255,0.38)">sora_v2_liked</code>
@@ -2409,12 +3158,14 @@
         SCAN_SOURCES.forEach(src => {
             const cb = document.getElementById('sdl-src-cb-' + src.id);
             if (!cb) return;
+            cb.checked = enabledSources.has(src.id);
             cb.addEventListener('change', () => {
                 if (cb.checked) enabledSources.add(src.id);
                 else enabledSources.delete(src.id);
                 updateScanButton();
             });
         });
+        applyV1FavoritesAvailability();
 
         // ── Settings / Expert drawers ──────────────────────────────────────
         document.getElementById('sdl-gear').addEventListener('click', () =>
