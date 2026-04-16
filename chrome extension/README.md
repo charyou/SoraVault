@@ -23,12 +23,14 @@ Bulk backup your Sora content (images, videos, drafts, liked) directly to your h
 
 ```
 your-chosen-folder/
-├── sora_v1_images/      ← V1 images (PNG)
-├── sora_v1_videos/      ← V1 videos (MP4)
-├── sora_v1_liked/       ← V1 liked content
-├── sora_v2_profile/     ← V2 published posts (MP4)
-├── sora_v2_drafts/      ← V2 drafts (MP4)
-└── sora_v2_liked/       ← V2 liked videos (MP4)
+├── sora_v1_images/       ← V1 images (PNG)
+├── sora_v1_videos/       ← V1 videos (MP4)
+├── sora_v1_liked/        ← V1 liked content
+├── sora_v2_profile/      ← V2 published posts (MP4)
+├── sora_v2_drafts/       ← V2 drafts (MP4)
+├── sora_v2_liked/        ← V2 liked videos (MP4)
+├── sora_v2_cameos/       ← V2 cameos (MP4)
+└── sora_v2_cameo_drafts/ ← V2 cameo drafts (MP4)
 ```
 
 Each file optionally accompanied by a `.txt` sidecar with the full prompt and metadata.

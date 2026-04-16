@@ -48,6 +48,8 @@
         { id: 'v2_profile', icon: '🎬', label: 'Videos',   sub: 'V2 published posts',   group: 'v2' },
         { id: 'v2_drafts',  icon: '📋', label: 'Drafts',   sub: 'V2 all generated',     group: 'v2' },
         { id: 'v2_liked',   icon: '♡',  label: 'Liked',    sub: 'V2 liked videos',      group: 'v2' },
+        { id: 'v2_cameos',  icon: '👤', label: 'Cameos',   sub: 'V2 cameos',            group: 'v2' },
+        { id: 'v2_cameo_drafts', icon: '👤📋', label: 'Cameo drafts', sub: 'V2 cameo drafts', group: 'v2' },
     ];
 
     // Per-category subfolder names — keyed by source ID
@@ -58,6 +60,8 @@
         v2_profile: 'sora_v2_profile',
         v2_drafts:  'sora_v2_drafts',
         v2_liked:   'sora_v2_liked',
+        v2_cameos:  'sora_v2_cameos',
+        v2_cameo_drafts: 'sora_v2_cameo_drafts',
     };
 
     const SPEED_PRESETS = [
@@ -165,9 +169,14 @@
             if (url.includes('/list_tasks'))
                 response.clone().json().then(d => ingestV1Page(d, 'v1_library')).catch(() => {});
             else if (url.includes('/backend/project_y/profile_feed/'))
-                response.clone().json().then(d => ingestV2Page(d, url, 'v2_profile')).catch(() => {});
+                if (url.includes('cut=appearances'))
+                    response.clone().json().then(d => ingestV2Page(d, url, 'v2_cameos')).catch(() => {});
+                else
+                    response.clone().json().then(d => ingestV2Page(d, url, 'v2_profile')).catch(() => {});
             else if (url.includes('/backend/project_y/profile/drafts/v2'))
                 response.clone().json().then(d => ingestV2Page(d, url, 'v2_drafts')).catch(() => {});
+            else if (url.includes('/backend/project_y/profile/drafts/cameos'))
+                response.clone().json().then(d => ingestV2Page(d, url, 'v2_cameo_drafts')).catch(() => {});
         }
         return response;
     };
@@ -300,7 +309,7 @@
     // DATA INGESTION — V2 (Videos / Profile + Drafts + Liked)
     // =====================================================================
     function ingestV2Page(data, url, sourceId) {
-        const isDrafts = sourceId === 'v2_drafts' ||
+        const isDrafts = sourceId === 'v2_drafts' || sourceId === 'v2_cameo_drafts' ||
                          (!sourceId && url && url.includes('/profile/drafts/'));
         const effectiveSource = sourceId ?? (isDrafts ? 'v2_drafts' : 'v2_profile');
         const items = data?.items ?? [];
@@ -317,6 +326,9 @@
 
         items.forEach(item => {
             if (isDrafts) {
+                const itemOriginal = item
+                if (sourceId === 'v2_cameo_drafts') item = item.draft;
+                
                 const genId = item.id ?? item.generation_id ?? '';
                 if (item.kind === 'sora_error' || item.kind === 'sora_content_violation') return;
                 if (!genId || collected.has(genId)) return;
@@ -342,7 +354,7 @@
                     downloadUrl, previewUrl: item.url ?? null, thumbUrl,
                     width: gw, height: gh, ratio,
                     duration: item.duration_s ?? null, model: null,
-                    _raw: item,
+                    _raw: itemOriginal,
                 });
                 added++;
             } else {
@@ -566,7 +578,7 @@
     }
 
     function applyV2GeoBlock() {
-        const v2Ids = ['v2_profile', 'v2_drafts', 'v2_liked'];
+        const v2Ids = ['v2_profile', 'v2_drafts', 'v2_liked', 'v2_cameos', 'v2_cameo_drafts'];
         v2Ids.forEach(id => {
             const cb  = document.getElementById('sdl-src-cb-' + id);
             const row = document.getElementById('sdl-src-row-' + id);
@@ -732,6 +744,8 @@
             v2_profile: () => fetchAllV2('/backend/project_y/profile_feed/me?limit=8&cut=nf2', 'v2_profile'),
             v2_drafts:  () => fetchAllV2('/backend/project_y/profile/drafts/v2?limit=15', 'v2_drafts'),
             v2_liked:   fetchAllV2Liked,
+            v2_cameos: () => fetchAllV2('/backend/project_y/profile_feed/me?limit=8&cut=appearances', 'v2_cameos'),
+            v2_cameo_drafts:  () => fetchAllV2('/backend/project_y/profile/drafts/cameos?limit=15', 'v2_cameo_drafts'),
         };
 
         for (const src of SCAN_SOURCES) {
@@ -2094,6 +2108,18 @@
           <span class="sdl-src-name">Liked</span>
           <span class="sdl-src-sub">V2 liked videos</span>
         </label>
+        <label class="sdl-src-row" id="sdl-src-row-v2_cameos">
+          <input type="checkbox" id="sdl-src-cb-v2_cameos" checked>
+          <span class="sdl-src-icon">👤</span>
+          <span class="sdl-src-name">Cameos</span>
+          <span class="sdl-src-sub">V2 cameos</span>
+        </label>
+        <label class="sdl-src-row" id="sdl-src-row-v2_cameo_drafts">
+          <input type="checkbox" id="sdl-src-cb-v2_cameo_drafts" checked>
+          <span class="sdl-src-icon">👤📋</span>
+          <span class="sdl-src-name">Cameo drafts</span>
+          <span class="sdl-src-sub">V2 cameo drafts</span>
+        </label>
       </div>
 
     </div>
@@ -2326,7 +2352,9 @@
       ♡  V1 Liked   → <code style="color:rgba(255,255,255,0.38)">sora_v1_liked</code><br>
       🎬 V2 Profile → <code style="color:rgba(255,255,255,0.38)">sora_v2_profile</code><br>
       📋 V2 Drafts  → <code style="color:rgba(255,255,255,0.38)">sora_v2_drafts</code><br>
-      ♡  V2 Liked   → <code style="color:rgba(255,255,255,0.38)">sora_v2_liked</code>
+      ♡  V2 Liked   → <code style="color:rgba(255,255,255,0.38)">sora_v2_liked</code><br>
+      👤 V2 Cameos  → <code style="color:rgba(255,255,255,0.38)">sora_v2_cameos</code><br>
+      👤📋 V2 Cameo drafts → <code style="color:rgba(255,255,255,0.38)">sora_v2_cameo_drafts</code>
     </div>
     <div style="font-size:9.5px;color:rgba(255,255,255,0.16);line-height:1.6;padding:0 0 4px">
       <strong style="color:rgba(255,255,255,0.25)">Chrome/Edge:</strong> folder picker — you choose where<br>
