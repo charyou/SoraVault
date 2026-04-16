@@ -49,18 +49,31 @@
     // =====================================================================
     // CONFIG & RELEASE INFO
     // =====================================================================
-    const VERSION      = '2.5.1';
-    const RELEASE_DATE = '2026-04-16';
+    const VERSION      = '2.5.3';
+    const RELEASE_DATE = '2026-04-17';
     const GITHUB_REPO  = 'charyou/SoraVault';
     const SORA_SHUTDOWN = new Date('2026-04-26T00:00:00Z');
 
     const CFG = {
         PARALLEL_DOWNLOADS: 2,
         DOWNLOAD_TXT:       true,
-        FILENAME_TEMPLATE:  '{date}_{prompt}_{genId}',
+        FILENAME_TEMPLATE:  '{genId}_{date}_{prompt}',
         PROMPT_MAX_LEN:     80,
         BEARER_TOKEN:       '', // <-- You can paste your "eyJ..." token here if you want to hardcode it
     };
+
+    // Skip-existing thresholds — files below these sizes are treated as failed/corrupt and re-downloaded
+    const SKIP_MIN_VIDEO_BYTES = 3 * 1024 * 1024;  // 3 MB — Sora videos are always larger
+    const SKIP_MIN_IMAGE_BYTES = 1 * 1024 * 1024;  // 1 MB — catches placeholder/stub PNGs
+    // Matches Sora ID tokens anywhere in a filename:
+    //   gen_01kmpedcn9eehbfaz17wy1h1fx  (V1 generation IDs — prefix kept so lookup via item.genId hits)
+    //   task_01…                         (V1 task IDs)
+    //   s_xxxxx…                         (V2 post/shared IDs)
+    //   bare 20+ char alnum runs         (fallback — e.g. custom templates)
+    //   classic UUID                     (older V1 IDs)
+    // The optional prefix makes prefixed and bare IDs match equally — at a given position the engine
+    // greedily consumes `gen_`/`task_`/`s_` before the alnum run, so `gen_01…` tokenises as one unit.
+    const EXISTING_ID_PATTERN  = /(?:gen_|task_|s_)?[A-Za-z0-9]{20,}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/g;
 
     const SHARED_VIDEO_ID_PATTERN            = /^s_[A-Za-z0-9_-]+$/;
     const WATERMARK_FETCH_MAX_ATTEMPTS       = 3;
@@ -149,6 +162,17 @@
     let dlMethod           = 'fs';
     let baseDir            = null;
     let cachedUserId       = null;
+
+    // Skip-existing state (per download run)
+    let skipEnabled        = true;
+    const existingFilesCache = new Map(); // subfolderName -> Map<idToken, { exts: Set<string>, sizes: Map<string, number> }>
+    let skipSummary        = null;        // { bySource: {[srcId]: {mp4,png,txt}}, totalSkipped }
+    let skipTemplateWarned = false;       // log the "keep {genId}" hint at most once per run
+
+    // Pause state (download only)
+    let isPaused           = false;
+    let pauseGate          = Promise.resolve();
+    let pauseResolver      = null;
 
     // Watermark proxy state
     let watermarkRemovalEnabled        = true;
@@ -1586,6 +1610,10 @@
 
     function stopAll() {
         stopRequested = true; isRunning = false;
+        // Release any paused workers so they observe stopRequested and exit
+        if (isPaused && pauseResolver) { pauseResolver(); pauseResolver = null; }
+        isPaused = false;
+        pauseGate = Promise.resolve();
         stopScanStories();
         log('Stopped.');
         if (collected.size > 0) { setState('ready'); rebuildAllChips(); recomputeSelection(); }
@@ -1628,6 +1656,145 @@
     }
 
     // =====================================================================
+    // SKIP-EXISTING + PAUSE HELPERS
+    // =====================================================================
+
+    // Extract all plausible ID tokens from a filename (stripped of ext).
+    // Returns an array — a filename may contain both genId and postId.
+    function extractIdTokensFromName(name) {
+        const stem = name.replace(/\.[^.]+$/, '');
+        const matches = stem.match(EXISTING_ID_PATTERN);
+        return matches ? matches : [];
+    }
+
+    // Enumerate a FileSystemDirectoryHandle once. Returns Map<idToken, {exts:Set, sizes:Map<ext,size>, names:Set}>.
+    // Fails open — any error returns an empty map so we never skip-by-mistake.
+    async function scanExistingFiles(dir) {
+        const map = new Map();
+        if (!dir || typeof dir.values !== 'function') return map;
+        try {
+            for await (const entry of dir.values()) {
+                if (entry.kind !== 'file') continue;
+                const name = entry.name;
+                const extMatch = name.match(/\.([a-z0-9]+)$/i);
+                const ext = extMatch ? ('.' + extMatch[1].toLowerCase()) : '';
+                let size = 0;
+                try { const f = await entry.getFile(); size = f.size; } catch(_) { /* size unknown → treat as 0 */ }
+                const tokens = extractIdTokensFromName(name);
+                // Also index by full stem for exact-match fallback when template omits {genId}
+                tokens.push(name.replace(/\.[^.]+$/, ''));
+                for (const tok of tokens) {
+                    if (!tok) continue;
+                    let rec = map.get(tok);
+                    if (!rec) { rec = { exts: new Set(), sizes: new Map(), names: new Set() }; map.set(tok, rec); }
+                    rec.exts.add(ext);
+                    rec.sizes.set(ext, size);
+                    rec.names.add(name);
+                }
+            }
+        } catch(e) {
+            log(`⚠ Could not enumerate "${dir.name}" for skip-check — will re-download.`);
+            return new Map();
+        }
+        return map;
+    }
+
+    // Look up candidate id tokens for this item against a pre-built existing map.
+    // Returns the record from the map (or null) for the first matching token.
+    function findExistingRecord(item, baseName, existingMap) {
+        if (!existingMap) return null;
+        const candidates = [item.genId, item.postId, item.taskId, baseName].filter(Boolean);
+        for (const c of candidates) {
+            const rec = existingMap.get(c);
+            if (rec) return rec;
+        }
+        return null;
+    }
+
+    function shouldSkipMedia(item, rec) {
+        if (!rec) return false;
+        const ext = getFileExt(item);
+        if (!rec.exts.has(ext)) return false;
+        const size = rec.sizes.get(ext) ?? 0;
+        const threshold = ext === '.mp4' ? SKIP_MIN_VIDEO_BYTES : SKIP_MIN_IMAGE_BYTES;
+        return size >= threshold;
+    }
+
+    function shouldSkipText(rec) {
+        if (!rec || !rec.exts.has('.txt')) return false;
+        const size = rec.sizes.get('.txt') ?? 0;
+        return size > 0;
+    }
+
+    function bumpSkipCount(sourceId, kind) {
+        if (!skipSummary) return;
+        const src = skipSummary.bySource[sourceId] ?? (skipSummary.bySource[sourceId] = {});
+        src[kind] = (src[kind] ?? 0) + 1;
+        skipSummary.totalSkipped += 1;
+    }
+
+    // Map a skip kind to human-readable noun for the summary line
+    const SKIP_KIND_LABELS = { mp4: 'videos', png: 'images', txt: 'prompts' };
+
+    function buildSkipSummaryLine() {
+        if (!skipSummary || skipSummary.totalSkipped === 0) return '';
+        const kinds = { mp4: 0, png: 0, txt: 0 };
+        const sources = {};
+        for (const [srcId, counts] of Object.entries(skipSummary.bySource)) {
+            let srcTotal = 0;
+            for (const [k, n] of Object.entries(counts)) {
+                kinds[k] = (kinds[k] ?? 0) + n;
+                srcTotal += n;
+            }
+            if (srcTotal > 0) sources[srcId] = srcTotal;
+        }
+        const kindParts = Object.entries(kinds)
+            .filter(([, n]) => n > 0)
+            .map(([k, n]) => `${n.toLocaleString()} ${SKIP_KIND_LABELS[k] ?? k}`);
+        const srcParts = Object.entries(sources)
+            .map(([id, n]) => `${SOURCE_LABELS[id] ?? id} ${n.toLocaleString()}`);
+        let line = `Skipped ${skipSummary.totalSkipped.toLocaleString()} existing files`;
+        if (kindParts.length) line += ` — ${kindParts.join(', ')}`;
+        if (srcParts.length)  line += ` · by source: ${srcParts.join(' · ')}`;
+        return line;
+    }
+
+    // Pause — workers await pauseGate between items
+    function waitIfPaused() {
+        return isPaused ? pauseGate : Promise.resolve();
+    }
+
+    function pauseDownload() {
+        if (isPaused || !isRunning) return;
+        isPaused = true;
+        pauseGate = new Promise(resolve => { pauseResolver = resolve; });
+        const btn = document.getElementById('sdl-pause');
+        if (btn) { btn.textContent = '▶ Resume'; btn.classList.add('sdl-paused'); }
+        const eta = document.getElementById('sdl-dl-eta');
+        if (eta) eta.textContent = 'Paused';
+        const bar = document.getElementById('sdl-dl-bar');
+        if (bar) bar.classList.add('sdl-bar-paused');
+        log('⏸ Paused — in-flight items will finish; no new items will start.');
+    }
+
+    function resumeDownload() {
+        if (!isPaused) return;
+        isPaused = false;
+        if (pauseResolver) { pauseResolver(); pauseResolver = null; }
+        pauseGate = Promise.resolve();
+        const btn = document.getElementById('sdl-pause');
+        if (btn) { btn.textContent = '⏸ Pause'; btn.classList.remove('sdl-paused'); }
+        const bar = document.getElementById('sdl-dl-bar');
+        if (bar) bar.classList.remove('sdl-bar-paused');
+        log('▶ Resumed.');
+    }
+
+    function togglePause() {
+        if (!isRunning) return;
+        if (isPaused) resumeDownload(); else pauseDownload();
+    }
+
+    // =====================================================================
     // DOWNLOAD
     // =====================================================================
     async function startDownload() {
@@ -1638,6 +1805,7 @@
         const saveMedia = readConfigBool('SAVE_MEDIA', true);
         const saveTxt   = readConfigBool('DOWNLOAD_TXT', CFG.DOWNLOAD_TXT);
         const saveJSON  = readConfigBool('SAVE_JSON', false);
+        skipEnabled     = readConfigBool('SKIP_EXISTING', true);
         watermarkRemovalEnabled = readConfigBool('WATERMARK_REMOVAL', false);
 
         if (!saveMedia && !saveTxt && !saveJSON) {
@@ -1683,6 +1851,25 @@
         globalRateLimitCooldownUntilMs = 0;
         watermarkRateLimitStreak = 0;
 
+        // Reset pause + skip state for this run
+        isPaused = false; pauseGate = Promise.resolve(); pauseResolver = null;
+        existingFilesCache.clear();
+        skipSummary = { bySource: {}, totalSkipped: 0 };
+        skipTemplateWarned = false;
+        const pauseBtn = document.getElementById('sdl-pause');
+        if (pauseBtn) { pauseBtn.textContent = '⏸ Pause'; pauseBtn.classList.remove('sdl-paused'); }
+        const barEl = document.getElementById('sdl-dl-bar');
+        if (barEl) barEl.classList.remove('sdl-bar-paused');
+
+        // Warn once if skip is on but template won't match reliably
+        if (skipEnabled) {
+            const tpl = readConfig('FILENAME_TEMPLATE') || CFG.FILENAME_TEMPLATE;
+            if (!tpl.includes('{genId}')) {
+                log('ℹ Skip-existing works best with {genId} in the filename template — falling back to exact-name match.');
+                skipTemplateWarned = true;
+            }
+        }
+
         const word = getContentWord();
         let logParts = [`Downloading ${totalToDownload} ${word}`];
         if (saveTxt)   logParts.push('+TXT');
@@ -1705,12 +1892,27 @@
             return subDirCache[name];
         }
 
+        // Build (once per subfolder) a map of existing files for skip-check
+        async function getExistingMap(item) {
+            if (!skipEnabled || dlMethod !== 'fs') return null;
+            const name = getSubfolderName(item);
+            if (!existingFilesCache.has(name)) {
+                const dir = await getSubDir(item);
+                existingFilesCache.set(name, await scanExistingFiles(dir));
+            }
+            return existingFilesCache.get(name);
+        }
+
         const dlStart = Date.now();
         let idx = 0;
 
         async function worker() {
             let prevI = null;
             while (idx < items.length && !stopRequested) {
+                // Block here if paused, then re-check stop (stop wins over resume)
+                if (isPaused) await waitIfPaused();
+                if (stopRequested) break;
+
                 const i = idx++, item = items[i];
 
                 // Clean up previous item's entry at start of next — eliminates the empty-line gap
@@ -1719,7 +1921,6 @@
 
                 const base = buildBase(item);
                 const ext  = getFileExt(item);
-                log(`[${i+1}/${totalToDownload}] ${base.slice(0, 55)}…`);
 
                 const srcLabel = SCAN_SOURCES.find(s => s.id === item.sourceId)?.label ?? '';
                 const setPhase = phrase => {
@@ -1728,28 +1929,55 @@
                 };
                 setPhase(`⬇ ${srcLabel}`);
 
+                // ── Skip-existing check (FS mode only) ───────────────────────
+                const existingMap = await getExistingMap(item);
+                const rec         = findExistingRecord(item, base, existingMap);
+                const mediaSkip   = saveMedia && shouldSkipMedia(item, rec);
+                const txtSkip     = saveTxt   && shouldSkipText(rec);
+                const allRequestedSkippable = (!saveMedia || mediaSkip) && (!saveTxt || txtSkip);
+
+                if (allRequestedSkippable && rec) {
+                    if (mediaSkip) bumpSkipCount(item.source || item.sourceId, ext.replace('.', ''));
+                    if (txtSkip)   bumpSkipCount(item.source || item.sourceId, 'txt');
+                    completedCount++;
+                    setPhase(null);
+                    updateDownloadProgress(dlStart);
+                    // No inter-item delay for pure skips — keeps a 5000-item re-run fast
+                    continue;
+                }
+
+                log(`[${i+1}/${totalToDownload}] ${base.slice(0, 55)}…`);
+
                 let mediaOk = true;
 
                 if (saveMedia) {
-                    const url = await getDownloadUrl(item);
-                    if (!url) {
-                        failedCount++;
-                        log(`No URL: ${item.genId || item.postId}`);
-                        updateDownloadProgress(dlStart);
-                        continue;
+                    if (mediaSkip) {
+                        bumpSkipCount(item.source || item.sourceId, ext.replace('.', ''));
+                    } else {
+                        const url = await getDownloadUrl(item);
+                        if (!url) {
+                            failedCount++;
+                            log(`No URL: ${item.genId || item.postId}`);
+                            updateDownloadProgress(dlStart);
+                            continue;
+                        }
+                        const targetDir = dlMethod === 'fs' ? await getSubDir(item) : null;
+                        mediaOk = await downloadMediaWithWatermarkProxyFallback(item, url, base + ext, targetDir, setPhase);
                     }
-                    const targetDir = dlMethod === 'fs' ? await getSubDir(item) : null;
-                    mediaOk = await downloadMediaWithWatermarkProxyFallback(item, url, base + ext, targetDir, setPhase);
                 }
 
                 if (saveTxt) {
-                    await sleep(60);
-                    const content = buildTxtContent(item);
-                    if (dlMethod === 'fs' && baseDir) {
-                        const targetDir = await getSubDir(item);
-                        await downloadTextFileFS(content, base + '.txt', targetDir);
-                    } else if (dlMethod === 'gm') {
-                        await downloadTextFileGM(content, getSubfolderName(item), base + '.txt');
+                    if (txtSkip) {
+                        bumpSkipCount(item.source || item.sourceId, 'txt');
+                    } else {
+                        await sleep(60);
+                        const content = buildTxtContent(item);
+                        if (dlMethod === 'fs' && baseDir) {
+                            const targetDir = await getSubDir(item);
+                            await downloadTextFileFS(content, base + '.txt', targetDir);
+                        } else if (dlMethod === 'gm') {
+                            await downloadTextFileGM(content, getSubfolderName(item), base + '.txt');
+                        }
                     }
                 }
 
@@ -1776,11 +2004,17 @@
         }
 
         isRunning = false;
+        isPaused = false;
+        if (pauseResolver) { pauseResolver(); pauseResolver = null; }
+        pauseGate = Promise.resolve();
         workerActivities.clear();
         renderActivityLine();
         if (activityWarningTimer) { clearTimeout(activityWarningTimer); activityWarningTimer = null; }
         const actRightEl = document.getElementById('sdl-activity-right');
         if (actRightEl) actRightEl.textContent = '';
+
+        const skipLine = buildSkipSummaryLine();
+        if (skipLine) log(skipLine);
 
         if (stopRequested) {
             log(`Stopped — ${completedCount} saved, ${failedCount} failed`);
@@ -1850,6 +2084,16 @@
                 document.getElementById('sdl-done-filter-list').textContent = lastFilterSnap.join(' · ');
             } else {
                 filtersEl.style.display = 'none';
+            }
+        }
+        const skippedEl = document.getElementById('sdl-done-skipped');
+        if (skippedEl) {
+            const skipLine = buildSkipSummaryLine();
+            if (skipLine) {
+                skippedEl.style.display = '';
+                skippedEl.innerHTML = `<span class="sdl-done-skipped-lbl">Skipped (already on disk)</span>${skipLine.replace(/^Skipped [\d,]+ existing files\s*/, '')}`;
+            } else {
+                skippedEl.style.display = 'none';
             }
         }
         const coffeeMsg = document.querySelector('#sdl-s-done .sdl-coffee-msg');
@@ -2076,7 +2320,9 @@
         if (dEl) dEl.textContent = completedCount;
         if (fEl) { fEl.textContent = failedCount; if (fWrap) fWrap.style.color = failedCount > 0 ? '#f87171' : ''; }
         if (bar && totalToDownload > 0) bar.style.width = (done / totalToDownload * 100) + '%';
-        if (eta && dlStart && completedCount > 0) {
+        if (eta && isPaused) {
+            eta.textContent = 'Paused';
+        } else if (eta && dlStart && completedCount > 0) {
             const elapsed   = (Date.now() - dlStart) / 1000;
             const rate      = completedCount / elapsed;
             const remaining = totalToDownload - completedCount - failedCount;
@@ -2311,6 +2557,13 @@
 .sdl-btn-secondary:not(:disabled):hover { background:rgba(255,255,255,0.09); }
 .sdl-btn-stop { background:rgba(248,113,113,0.1); color:#fca5a5; border:0.5px solid rgba(248,113,113,0.18); }
 .sdl-btn-stop:not(:disabled):hover { background:rgba(248,113,113,0.18); }
+.sdl-btn-pause { background:rgba(251,191,36,0.08); color:#fcd34d; border:0.5px solid rgba(251,191,36,0.16); }
+.sdl-btn-pause:not(:disabled):hover { background:rgba(251,191,36,0.14); }
+.sdl-btn-pause.sdl-paused { background:rgba(34,197,94,0.1); color:#86efac; border-color:rgba(34,197,94,0.2); }
+.sdl-btn-pause.sdl-paused:not(:disabled):hover { background:rgba(34,197,94,0.18); }
+.sdl-dl-actions { display:flex; gap:6px; }
+.sdl-dl-actions .sdl-btn { margin-bottom:0; }
+.sdl-prog-bar.sdl-bar-paused { opacity:0.45; background:rgba(251,191,36,0.55); }
 .sdl-btn-ghost { background:none; color:rgba(255,255,255,0.3); border:0.5px solid rgba(255,255,255,0.08); font-size:11.5px; padding:7px 14px; }
 .sdl-btn-ghost:not(:disabled):hover { color:rgba(255,255,255,0.6); border-color:rgba(255,255,255,0.18); }
 
@@ -2572,6 +2825,12 @@
   background:rgba(99,102,241,0.07); border:0.5px solid rgba(99,102,241,0.2);
   font-size:10px; color:rgba(165,170,255,0.7); line-height:1.5;
 }
+.sdl-done-skipped {
+  margin-bottom:12px; padding:8px 11px; border-radius:9px;
+  background:rgba(148,163,184,0.05); border:0.5px solid rgba(148,163,184,0.15);
+  font-size:10px; color:rgba(203,213,225,0.7); line-height:1.5;
+}
+.sdl-done-skipped-lbl { color:rgba(255,255,255,0.2); display:block; margin-bottom:2px; font-size:9px; text-transform:uppercase; letter-spacing:0.07em; }
 .sdl-done-filters-lbl { color:rgba(255,255,255,0.2); display:block; margin-bottom:2px; font-size:9px; text-transform:uppercase; letter-spacing:0.07em; }
 .sdl-done-secondary {
   display:flex; align-items:center; justify-content:center; gap:8px;
@@ -2763,6 +3022,14 @@
         </label>
       </div>
       <div class="sdl-export-row">
+        <span class="sdl-export-lbl">Skip already-downloaded<span>Files matched by {genId} + min size (video ≥3 MB, image ≥1 MB). Uncheck to force re-download.</span></span>
+        <label class="sdl-toggle">
+          <input type="checkbox" id="sdl-cfg-SKIP_EXISTING" checked>
+          <div class="sdl-toggle-track"></div>
+          <div class="sdl-toggle-thumb"></div>
+        </label>
+      </div>
+      <div class="sdl-export-row">
         <span class="sdl-export-lbl">Watermark Removal<span>Via soravdl.com (3rd party). No support for drafts.</span></span>
         <span class="sdl-export-badge" id="sdl-watermark-estimate">+0 min</span>
         <label class="sdl-toggle">
@@ -2909,7 +3176,10 @@
       </div>
       <div class="sdl-speed-hint">2 workers · 60 ms delay · safe</div>
     </div>
-    <button class="sdl-btn sdl-btn-stop" id="sdl-stop-dl">Stop</button>
+    <div class="sdl-dl-actions">
+      <button class="sdl-btn sdl-btn-secondary sdl-btn-pause" id="sdl-pause">⏸ Pause</button>
+      <button class="sdl-btn sdl-btn-stop" id="sdl-stop-dl">Stop</button>
+    </div>
   </div>
 
   <!-- ─── STATE: done ──────────────────────────────────────── -->
@@ -2920,6 +3190,7 @@
       <div class="sdl-done-saved" id="sdl-done-saved">Computing time saved…</div>
     </div>
     <div class="sdl-done-stats" id="sdl-done-stats"></div>
+    <div class="sdl-done-skipped" id="sdl-done-skipped" style="display:none"></div>
     <div class="sdl-done-filters" id="sdl-done-filters" style="display:none">
       <span class="sdl-done-filters-lbl">Filters applied</span>
       <span id="sdl-done-filter-list"></span>
@@ -3068,6 +3339,7 @@
         document.getElementById('sdl-scan').addEventListener('click',      startScan);
         document.getElementById('sdl-stop-scan').addEventListener('click', stopAll);
         document.getElementById('sdl-stop-dl').addEventListener('click',   stopAll);
+        document.getElementById('sdl-pause').addEventListener('click',     togglePause);
         document.getElementById('sdl-dl').addEventListener('click',        startDownload);
 
         document.getElementById('sdl-rescan').addEventListener('click', () => {

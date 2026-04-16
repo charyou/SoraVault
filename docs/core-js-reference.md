@@ -33,7 +33,10 @@
 24. VERSION CHECK              checkForUpdate()
 25. SCAN                       startScan(), stopAll()
 26. WATERMARK ESTIMATE BADGE   formatWatermarkEstimateLabel(), updateWatermarkEstimateBadge()
-27. DOWNLOAD                   startDownload()
+27. SKIP-EXISTING + PAUSE      scanExistingFiles(), findExistingRecord(), shouldSkipMedia(),
+                               shouldSkipText(), bumpSkipCount(), buildSkipSummaryLine(),
+                               waitIfPaused(), pauseDownload(), resumeDownload(), togglePause()
+28. DOWNLOAD                   startDownload()
 28. END SCREEN                 computeTimeSaved(), showEndScreen()
 29. STATE MACHINE              setState(), syncExpertSections()
 30. FILTER LOGIC               resetFilters(), resetFilterInputs(), rebuildSourceChips(), rebuildAllChips(), rebuildChips()
@@ -52,8 +55,8 @@
 
 ### Release info
 ```js
-const VERSION      = '2.0.1';
-const RELEASE_DATE = '2026-04-14';
+const VERSION      = '2.5.2';
+const RELEASE_DATE = '2026-04-17';
 const GITHUB_REPO  = 'charyou/SoraVault';
 const SORA_SHUTDOWN = new Date('2026-04-26T00:00:00Z');
 ```
@@ -152,6 +155,13 @@ All state is in the IIFE closure — no globals.
 | `srcStatus` | `object<id, string>` | Per-source scan status: `'idle'`/`'pending'`/`'active'`/`'done'`/`'error'`/`'skipped'` |
 | `filters` | `object` | All active filter values (see Filter System) |
 | `toastTimer` | `number\|null` | Auto-hide timer for toast notification |
+| `skipEnabled` | `boolean` | Snapshot of SKIP_EXISTING toggle at download start |
+| `existingFilesCache` | `Map<subfolderName, Map<idToken, {exts, sizes, names}>>` | Per-subfolder existing-files index built once per download run |
+| `skipSummary` | `{bySource, totalSkipped}\|null` | Tally of skipped files per source + type; consumed by `buildSkipSummaryLine()` |
+| `skipTemplateWarned` | `boolean` | Guard: log the "keep `{genId}` in template" hint at most once per run |
+| `isPaused` | `boolean` | True while download is paused |
+| `pauseGate` | `Promise<void>` | Workers `await` this between items when paused |
+| `pauseResolver` | `() => void \| null` | Resolver for current `pauseGate`; set on pause, cleared on resume/stop |
 
 ---
 

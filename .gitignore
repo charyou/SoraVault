@@ -49,3 +49,11 @@ CLAUDE.md
 ! .claude/skills/
 CLAUDE.local.md
 sprint-notes.md
+
+# Build output (testing only) #
+######################
+dist/
+
+# Internal planning docs #
+######################
+docs/spring-batch.md
