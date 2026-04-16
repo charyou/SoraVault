@@ -21,6 +21,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - **Proxy failure faster** — max retry attempts reduced from 6 → 3, max retry delay
   from 20 s → 10 s. A dead proxy session now aborts sooner and falls back to direct
   download faster.
+- **Download fetch timeout + retry** — direct video downloads now abort after 30 s
+  instead of hanging indefinitely. One automatic retry follows before the item is
+  marked as failed. Prevents workers from parking on stalled requests (e.g. under
+  VPN or transient Azure connectivity issues).
 
 ---
 

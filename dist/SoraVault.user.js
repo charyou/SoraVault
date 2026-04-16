@@ -1021,16 +1021,33 @@
     // =====================================================================
     // FILE SYSTEM HELPERS
     // =====================================================================
+    async function fetchBlobWithTimeout(url, timeoutMs) {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), timeoutMs);
+        try {
+            const r = await _fetch(url, { signal: ctrl.signal });
+            if (!r.ok) return { ok: false, status: r.status };
+            return { ok: true, blob: await r.blob() };
+        } finally {
+            clearTimeout(t);
+        }
+    }
+
     async function downloadFileFS(url, filename, dir) {
         let blob;
 
-        // 1) Try native fetch first
-        try {
-            const r = await _fetch(url);
-            if (r.ok) blob = await r.blob();
-            else log(`⚠ fetch ${r.status} for ${filename}`);
-        } catch(e) {
-            log(`⚠ fetch error for ${filename}: ${e.message}`);
+        // 1) Native fetch with timeout + one retry — prevents workers from parking on hung requests
+        const FETCH_TIMEOUT_MS = 30000;
+        for (let attempt = 1; attempt <= 2 && !blob; attempt++) {
+            try {
+                const res = await fetchBlobWithTimeout(url, FETCH_TIMEOUT_MS);
+                if (res.ok) { blob = res.blob; break; }
+                log(`⚠ fetch ${res.status} for ${filename}${attempt === 1 ? ' — retrying' : ''}`);
+            } catch(e) {
+                const reason = e?.name === 'AbortError' ? `timeout after ${FETCH_TIMEOUT_MS/1000}s` : e.message;
+                log(`⚠ fetch error for ${filename}: ${reason}${attempt === 1 ? ' — retrying' : ''}`);
+            }
+            if (!blob && attempt === 1) await sleep(800);
         }
 
         // 2) Fallback: GM_xmlhttpRequest (bypasses CORS / VPN issues) — Tampermonkey only
