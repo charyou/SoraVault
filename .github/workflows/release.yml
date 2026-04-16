@@ -24,7 +24,7 @@ jobs:
       - name: Zip Chrome Extension
         run: |
           cd dist
-          zip -r ../SoraVault-chrome-v${{ steps.version.outputs.version }}.zip chrome-extension/
+          zip -r ../SoraVault-chrome.zip chrome-extension/
 
       - name: Extract changelog section
         run: |
@@ -51,5 +51,5 @@ jobs:
           name: v${{ steps.version.outputs.version }}
           body_path: release_notes.md
           files: |
-            SoraVault-chrome-v${{ steps.version.outputs.version }}.zip
+            SoraVault-chrome.zip
             dist/SoraVault.user.js

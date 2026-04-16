@@ -53,9 +53,9 @@ SoraVault is a free, API-driven tool to bulk export your OpenAI Sora library. Ea
 
 ### Option A: Chrome / Edge Extension (for installation in dev mode, more convenient - RECOMMENDED)
 
-[SoraVault 2 - Chrome Extension](dist/chrome-extension)
+[⬇ Download SoraVault — Chrome Extension (latest)](https://github.com/charyou/SoraVault/releases/latest/download/SoraVault-chrome.zip)
 
-1. Download the whole folder and unzip it to any folder
+1. Download the zip and unpack it to any folder
 2. In Chrome/Edge, go to your extension tab, activate developer mode (it's a small toggle switch, usually located in the top right corner).
 3. Click the "Load unpacked" button that has now appeared at the top left of the page.
 4. Browse to and select the folder where you unzipped the extension files in Step 1.
@@ -70,9 +70,9 @@ SoraVault is a free, API-driven tool to bulk export your OpenAI Sora library. Ea
 1. Install [Tampermonkey](https://tampermonkey.net) for your browser. 
 > **What is Tampermonkey and is it safe?** > Tampermonkey is a highly trusted browser extension with over 10 million users on the official Chrome and Firefox web stores. It acts as a safe manager that lets you run custom, open-source code on specific websites. It is completely safe—you can read every line of SoraVault's code before installing it, and the script is strictly sandboxed to only run on `sora.chatgpt.com`.
 > In your extension tab: Be sure to enable "developer mode", go to details of Tampermonkey and enable "allow user scripts"
-2. Open the [SoraVault v2.5 Script](dist/SoraVault.user.js) file here on GitHub.
-3. Click the **"Raw"** button (top right of the code window). Tampermonkey will auto-detect the script and prompt you to install it. *(Alternatively, download the file and drag & drop it into your browser).* 4. Go to [sora.chatgpt.com](https://sora.chatgpt.com).
-5. Use the SoraVault panel on the page: **Scan** → **Filter** (optional) → **Download**.
+2. Download the [latest SoraVault userscript](https://github.com/charyou/SoraVault/releases/latest/download/SoraVault.user.js) — Tampermonkey will auto-detect it and prompt to install. *(If it doesn't, drag & drop the downloaded `.user.js` file into your browser.)*
+3. Go to [sora.chatgpt.com](https://sora.chatgpt.com).
+4. Use the SoraVault panel on the page: **Scan** → **Filter** (optional) → **Download**.
 
 
 ---
