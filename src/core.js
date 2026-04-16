@@ -49,7 +49,7 @@
     // =====================================================================
     // CONFIG & RELEASE INFO
     // =====================================================================
-    const VERSION      = '2.5.0';
+    const VERSION      = '2.5.1';
     const RELEASE_DATE = '2026-04-16';
     const GITHUB_REPO  = 'charyou/SoraVault';
     const SORA_SHUTDOWN = new Date('2026-04-26T00:00:00Z');
@@ -2746,7 +2746,7 @@
         </label>
       </div>
       <div class="sdl-export-row">
-        <span class="sdl-export-lbl">Watermark Removal<span>Slow. No support for drafts.</span></span>
+        <span class="sdl-export-lbl">Watermark Removal<span>Via soravdl.com (3rd party). No support for drafts.</span></span>
         <span class="sdl-export-badge" id="sdl-watermark-estimate">+0 min</span>
         <label class="sdl-toggle">
           <input type="checkbox" id="sdl-cfg-WATERMARK_REMOVAL">

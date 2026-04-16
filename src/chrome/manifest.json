@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SoraVault",
-  "version": "2.5.0",
+  "version": "2.5.1",
   "description": "Bulk backup Sora content — images, videos, drafts, liked content. API-driven, page-independent.",
   "author": "Sebastian Haas (charyou)",
   "homepage_url": "https://github.com/charyou/SoraVault",

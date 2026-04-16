@@ -7,6 +7,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ---
 
+## [2.5.1] — 2026-04-16
+
+### Fixed
+
+- **Watermark removal off by default** — the toggle now ships unchecked. Users who
+  want watermark-free downloads can enable it manually. This avoids confusion for
+  users who saw slow or failed downloads without understanding why (soravdl.com is
+  a third-party proxy — availability is not guaranteed).
+- **UI label clarified** — the watermark removal sub-label now reads
+  *"Via soravdl.com (3rd party). No support for drafts."* so it's immediately
+  clear this relies on an external service.
+- **Proxy failure faster** — max retry attempts reduced from 6 → 3, max retry delay
+  from 20 s → 10 s. A dead proxy session now aborts sooner and falls back to direct
+  download faster.
+
+---
+
 ## [2.5.0] — 2026-04-16
 
 ### Added
