@@ -27,13 +27,13 @@ SoraVault is a free, API-driven tool to bulk export your OpenAI Sora library. Ea
 | Prompt saved as .txt sidecar | ✅ | ❌ | ❌ | ❌ |
 | Raw JSON metadata export | ✅ | ❌ | ❌ | ❌ |
 | Bulk download (entire library) | ✅ | ✅ (one ZIP, no filters) | ❌ | Partial |
-| Smart filters (source, author, ratio, quality, date, favorites) | ✅ | ❌ | ❌ | ❌ |
+| Smart filters (source, author, ratio, quality, date, favorites **NEW** ) | ✅ | ❌ | ❌ | ❌ |
 | Instant — no waiting period | ✅ | ❌ (days of waiting) | ✅ | ❌ |
 | No link expiry | ✅ | ❌ (link expires in 24h) | ✅ | — |
 | API-Driven (No page scrolling required) | ✅ | — | — | ❌ |
 | Parallel downloads (up to 8x speed) | ✅ | ❌ | ❌ | ❌ |
 | Granular auto-folder sorting | ✅ | ❌ | ❌ | ❌ |
-| Only Export your Favorites (v1) | ✅ | ❌ | ❌ | ❌ |
+| Only Export your Favorites (v1) | ✅ **NEW** | ❌ | ❌ | ❌ |
 
 ---
 
@@ -192,12 +192,10 @@ author (Sebastian Haas) and a link to https://github.com/charyou/SoraVault.
 
 This software is provided as-is, without warranty of any kind.
 
+*Credits*
+- Watermark removal logic inspired by Casey Jardin (MIT License).
+
 ---
 
 *Built with urgency and care by Sebastian —
- [X](https://x.com/charjou) 
-
----
-
-*Credits*
-- Watermark removal logic inspired by Casey Jardin (MIT License).
+ [X](https://x.com/charjou) — [LinkedIn](https://www.linkedin.com/in/-sebastian-haas/)
