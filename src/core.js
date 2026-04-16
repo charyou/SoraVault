@@ -1,30 +1,56 @@
-/**
- * SoraVault 2.0 — content.js
- * Chrome Extension port of the Tampermonkey userscript.
- *
- * Runs in MAIN world so it can intercept window.fetch and window.XMLHttpRequest.
- * Asset URLs are resolved via the bridge.js meta tag injection.
- *
- * Original: https://github.com/charyou/SoraVault
- * Author: Sebastian Haas (charyou)
- * License: © 2026 Sebastian Haas – Personal use only; no redistribution or resale.
- */
+/*! 
+  SoraVault Core Logic
+  (c) 2026 Sebastian Haas (charyou)
+
+  THIRD-PARTY NOTICE:
+  The watermark removal and proxy logic is based on code by Casey Jardin.
+  
+  MIT License
+  Copyright (c) 2026 Casey Jardin
+  
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+*/
+
+
 (function () {
     'use strict';
 
     // =====================================================================
-    // CHROME EXTENSION — resolve asset URL via bridge meta tag
+    // PLATFORM DETECTION — runtime environment switcher
     // =====================================================================
-    const _EXT_BASE = document.querySelector('meta[name="soravault-ext-base"]')?.content ?? '';
-    const LOGO_URL = _EXT_BASE
-        ? _EXT_BASE + 'assets/soravault-logo-square.png'
-        : `https://raw.githubusercontent.com/charyou/SoraVault/main/assets/soravault-logo-square.png`;
+    const ENV = {
+        isTM:  typeof GM_download === 'function',
+        win:   typeof unsafeWindow !== 'undefined' ? unsafeWindow : window,
+        hasGM: typeof GM_download === 'function',
+        LOGO_URL: (() => {
+            const meta = document.querySelector('meta[name="soravault-ext-base"]');
+            return meta?.content
+                ? meta.content + 'assets/soravault-logo-square.png'
+                : 'https://raw.githubusercontent.com/charyou/SoraVault/main/assets/soravault-logo-square.png';
+        })(),
+    };
 
     // =====================================================================
     // CONFIG & RELEASE INFO
     // =====================================================================
-    const VERSION      = '2.0.0';
-    const RELEASE_DATE = '2026-04-01';
+    const VERSION      = '2.5.0';
+    const RELEASE_DATE = '2026-04-16';
     const GITHUB_REPO  = 'charyou/SoraVault';
     const SORA_SHUTDOWN = new Date('2026-04-26T00:00:00Z');
 
@@ -36,33 +62,52 @@
         BEARER_TOKEN:       '', // <-- You can paste your "eyJ..." token here if you want to hardcode it
     };
 
+    const SHARED_VIDEO_ID_PATTERN            = /^s_[A-Za-z0-9_-]+$/;
+    const WATERMARK_FETCH_MAX_ATTEMPTS       = 6;
+    const WATERMARK_FETCH_BASE_RETRY_MS      = 1200;
+    const WATERMARK_FETCH_MAX_RETRY_MS       = 20000;
+    const WATERMARK_PROXY_FAILURE_LIMIT      = 3;
+    const MIN_VIDEO_BYTES_FALLBACK_THRESHOLD = 256 * 1024;
+    const ESTIMATED_SIZE_FALLBACK_RATIO      = 0.2;
+
     // =====================================================================
     // SCAN SOURCES  — single source of truth for all source-aware logic
     // =====================================================================
     const SCAN_SOURCES = [
         { id: 'v1_library', icon: '📷', label: 'Library',  sub: 'V1 image library',    group: 'v1' },
-        { id: 'v1_liked',   icon: '♡',  label: 'Likes',    sub: 'V1 favorites',         group: 'v1' },
-        { id: 'v2_profile', icon: '🎬', label: 'Videos',   sub: 'V2 published posts',   group: 'v2' },
-        { id: 'v2_drafts',  icon: '📋', label: 'Drafts',   sub: 'V2 all generated',     group: 'v2' },
-        { id: 'v2_liked',   icon: '♡',  label: 'Liked',    sub: 'V2 liked videos',      group: 'v2' },
-        { id: 'v2_cameos',  icon: '👤', label: 'Cameos',   sub: 'V2 cameos',            group: 'v2' },
-        { id: 'v2_cameo_drafts', icon: '👤📋', label: 'Cameo drafts', sub: 'V2 cameo drafts', group: 'v2' },
+        { id: 'v1_liked',   icon: '♡',  label: 'Likes',    sub: 'V1 liked content',         group: 'v1' },
+        { id: 'v2_profile',       icon: '🎬',   label: 'Videos',        sub: 'V2 published posts',    group: 'v2' },
+        { id: 'v2_drafts',        icon: '📋',   label: 'Drafts',        sub: 'V2 all generated',      group: 'v2' },
+        { id: 'v2_liked',         icon: '♡',    label: 'Liked',         sub: 'V2 liked videos',       group: 'v2' },
+        { id: 'v2_cameos',        icon: '👤',   label: 'Cameos',        sub: 'V2 posts featuring you', group: 'v2' },
+        { id: 'v2_cameo_drafts',  icon: '👤📋', label: 'Cameo drafts',  sub: 'V2 drafts featuring you', group: 'v2' },
     ];
+
+    // Human-readable labels for filter chips — keyed by source ID
+    const SOURCE_LABELS = {
+        v1_library: 'Library',
+        v1_liked:   'Likes (v1)',
+        v2_profile:      'Videos',
+        v2_drafts:       'Drafts',
+        v2_liked:        'Liked',
+        v2_cameos:       'Cameos',
+        v2_cameo_drafts: 'Cameo drafts',
+    };
 
     // Per-category subfolder names — keyed by source ID
     const SUBFOLDERS = {
         v1_library: 'sora_v1_images',
         v1_videos:  'sora_v1_videos',
         v1_liked:   'sora_v1_liked',
-        v2_profile: 'sora_v2_profile',
-        v2_drafts:  'sora_v2_drafts',
-        v2_liked:   'sora_v2_liked',
-        v2_cameos:  'sora_v2_cameos',
+        v2_profile:      'sora_v2_profile',
+        v2_drafts:       'sora_v2_drafts',
+        v2_liked:        'sora_v2_liked',
+        v2_cameos:       'sora_v2_cameos',
         v2_cameo_drafts: 'sora_v2_cameo_drafts',
     };
 
     const SPEED_PRESETS = [
-        { workers: 2, delay: 300 },
+        { workers: 2, delay:  60 },
         { workers: 4, delay: 150 },
         { workers: 8, delay:  60 },
     ];
@@ -82,6 +127,9 @@
     // STATE
     // =====================================================================
     const collected        = new Map();
+    const workerActivities  = new Map(); // item-index → current activity phrase
+    let activityRenderTimer  = null;
+    let activityWarningTimer = null;
     let oaiDeviceId        = null;
     let oaiLanguage        = 'en-US';
     const storedV2Headers  = {};
@@ -102,6 +150,13 @@
     let baseDir            = null;
     let cachedUserId       = null;
 
+    // Watermark proxy state
+    let watermarkRemovalEnabled        = true;
+    let watermarkProxyDisabled         = false;
+    let watermarkProxyFailureCount     = 0;
+    let globalRateLimitCooldownUntilMs = 0;
+    let watermarkRateLimitStreak       = 0;
+
     // Geo-blocking
     let isV2Supported      = true;
     let geoCheckInitDone   = false;
@@ -117,6 +172,8 @@
         keyword: '', ratios: new Set(), dateFrom: '', dateTo: '',
         qualities: new Set(), operations: new Set(), nItems: '', nDirection: 'last',
         authorExclude: '',   // exclude by author (likes); empty = no filter
+        filterSources: new Set(),  // empty = all sources; non-empty = only these
+        onlyFavorites: false,      // v1 library only — filter to is_favorite === true
     };
 
     // =====================================================================
@@ -134,9 +191,9 @@
     // =====================================================================
     // FETCH INTERCEPT  — captures auth headers from Sora's own requests
     // =====================================================================
-    const _fetch = window.fetch.bind(window);
+    const _fetch = ENV.win.fetch.bind(ENV.win);
 
-    window.fetch = async function (...args) {
+    ENV.win.fetch = async function (...args) {
         const [resource, options] = args;
         const url  = typeof resource === 'string' ? resource : (resource?.url ?? '');
         const hdrs = options?.headers ?? {};
@@ -165,24 +222,23 @@
         if (response.ok) {
             if (url.includes('/list_tasks'))
                 response.clone().json().then(d => ingestV1Page(d, 'v1_library')).catch(() => {});
+            else if (url.includes('/backend/project_y/profile_feed/') && url.includes('cut=appearances'))
+                response.clone().json().then(d => ingestV2Page(d, url, 'v2_cameos')).catch(() => {});
             else if (url.includes('/backend/project_y/profile_feed/'))
-                if (url.includes('cut=appearances'))
-                    response.clone().json().then(d => ingestV2Page(d, url, 'v2_cameos')).catch(() => {});
-                else
-                    response.clone().json().then(d => ingestV2Page(d, url, 'v2_profile')).catch(() => {});
-            else if (url.includes('/backend/project_y/profile/drafts/v2'))
-                response.clone().json().then(d => ingestV2Page(d, url, 'v2_drafts')).catch(() => {});
+                response.clone().json().then(d => ingestV2Page(d, url, 'v2_profile')).catch(() => {});
             else if (url.includes('/backend/project_y/profile/drafts/cameos'))
                 response.clone().json().then(d => ingestV2Page(d, url, 'v2_cameo_drafts')).catch(() => {});
+            else if (url.includes('/backend/project_y/profile/drafts/v2'))
+                response.clone().json().then(d => ingestV2Page(d, url, 'v2_drafts')).catch(() => {});
         }
         return response;
     };
 
     // XHR intercept (same auth capture)
-    const _xhrOpen = window.XMLHttpRequest.prototype.open;
-    const _xhrSend = window.XMLHttpRequest.prototype.send;
-    const _xhrSetH = window.XMLHttpRequest.prototype.setRequestHeader;
-    window.XMLHttpRequest.prototype.setRequestHeader = function (n, v) {
+    const _xhrOpen = ENV.win.XMLHttpRequest.prototype.open;
+    const _xhrSend = ENV.win.XMLHttpRequest.prototype.send;
+    const _xhrSetH = ENV.win.XMLHttpRequest.prototype.setRequestHeader;
+    ENV.win.XMLHttpRequest.prototype.setRequestHeader = function (n, v) {
         if (n?.toLowerCase() === 'oai-device-id') { oaiDeviceId = v; refreshAuthBadge(); }
         if (n?.toLowerCase() === 'oai-language')  oaiLanguage = v;
         if (this._sv_url && this._sv_url.includes('/backend/project_y/')) {
@@ -192,11 +248,11 @@
         }
         return _xhrSetH.apply(this, arguments);
     };
-    window.XMLHttpRequest.prototype.open = function (m, u, ...r) {
+    ENV.win.XMLHttpRequest.prototype.open = function (m, u, ...r) {
         this._sv_url = u || '';
         return _xhrOpen.apply(this, [m, u, ...r]);
     };
-    window.XMLHttpRequest.prototype.send = function (...a) {
+    ENV.win.XMLHttpRequest.prototype.send = function (...a) {
         if ((this._sv_url || '').includes('/list_tasks'))
             this.addEventListener('load', function () {
                 if (this.status === 200) try { ingestV1Page(JSON.parse(this.responseText), 'v1_library'); } catch(e) {}
@@ -239,6 +295,7 @@
                     taskType,
                     nVariants,
                     isVideo,
+                    isFavorite: gen.is_favorite === true,
                     _raw: { task_id: taskId, task_prompt: prompt, ...gen },
                 });
                 added++;
@@ -321,11 +378,15 @@
             return undefined;
         };
 
-        items.forEach(item => {
+        items.forEach(rawItem => {
+            // Cameo drafts wrap the video object inside rawItem.draft
+            let item = rawItem;
+            if (sourceId === 'v2_cameo_drafts') {
+                if (!rawItem.draft || typeof rawItem.draft !== 'object') return;
+                item = rawItem.draft;
+            }
+
             if (isDrafts) {
-                const itemOriginal = item
-                if (sourceId === 'v2_cameo_drafts') item = item.draft;
-                
                 const genId = item.id ?? item.generation_id ?? '';
                 if (item.kind === 'sora_error' || item.kind === 'sora_content_violation') return;
                 if (!genId || collected.has(genId)) return;
@@ -351,7 +412,7 @@
                     downloadUrl, previewUrl: item.url ?? null, thumbUrl,
                     width: gw, height: gh, ratio,
                     duration: item.duration_s ?? null, model: null,
-                    _raw: itemOriginal,
+                    _raw: item,
                 });
                 added++;
             } else {
@@ -410,6 +471,10 @@
     // =====================================================================
     function getFilteredItems() {
         let result = [...collected.values()];
+        if (filters.filterSources.size > 0)
+            result = result.filter(i => filters.filterSources.has(i.source));
+        if (filters.onlyFavorites)
+            result = result.filter(i => i.mode === 'v1' && i.isFavorite === true);
         if (filters.keyword.trim()) {
             const terms = filters.keyword.toLowerCase().split(',').map(t => t.trim()).filter(Boolean);
             result = result.filter(i => terms.every(t => (i.prompt || '').toLowerCase().includes(t)));
@@ -439,6 +504,17 @@
         const vals = new Set();
         collected.forEach(item => {
             if (mode && item.mode !== mode) return;
+            if (item[key]) vals.add(item[key]);
+        });
+        return [...vals].sort();
+    }
+
+    // Like getDistinctValuesByMode but respects the active filterSources selection
+    function getDistinctValuesByModeFiltered(key, mode) {
+        const vals = new Set();
+        collected.forEach(item => {
+            if (mode && item.mode !== mode) return;
+            if (filters.filterSources.size > 0 && !filters.filterSources.has(item.source)) return;
             if (item[key]) vals.add(item[key]);
         });
         return [...vals].sort();
@@ -738,11 +814,11 @@
         const FETCH_MAP = {
             v1_library: fetchAllV1,
             v1_liked:   fetchAllV1Liked,
-            v2_profile: () => fetchAllV2('/backend/project_y/profile_feed/me?limit=8&cut=nf2', 'v2_profile'),
-            v2_drafts:  () => fetchAllV2('/backend/project_y/profile/drafts/v2?limit=15', 'v2_drafts'),
-            v2_liked:   fetchAllV2Liked,
-            v2_cameos: () => fetchAllV2('/backend/project_y/profile_feed/me?limit=8&cut=appearances', 'v2_cameos'),
-            v2_cameo_drafts:  () => fetchAllV2('/backend/project_y/profile/drafts/cameos?limit=15', 'v2_cameo_drafts'),
+            v2_profile:      () => fetchAllV2('/backend/project_y/profile_feed/me?limit=8&cut=nf2', 'v2_profile'),
+            v2_drafts:       () => fetchAllV2('/backend/project_y/profile/drafts/v2?limit=15', 'v2_drafts'),
+            v2_liked:        fetchAllV2Liked,
+            v2_cameos:       () => fetchAllV2('/backend/project_y/profile_feed/me?limit=8&cut=appearances', 'v2_cameos'),
+            v2_cameo_drafts: () => fetchAllV2('/backend/project_y/profile/drafts/cameos?limit=15', 'v2_cameo_drafts'),
         };
 
         for (const src of SCAN_SOURCES) {
@@ -902,7 +978,13 @@
         }
 
         const url = URL.createObjectURL(blob);
-        {
+        if (ENV.isTM) {
+            GM_download({
+                url, name: filename, saveAs: true,
+                onload:  () => URL.revokeObjectURL(url),
+                onerror: () => URL.revokeObjectURL(url),
+            });
+        } else {
             const a = document.createElement('a');
             a.href = url; a.download = filename;
             document.body.appendChild(a);
@@ -919,6 +1001,7 @@
     // =====================================================================
     async function downloadFileFS(url, filename, dir) {
         let blob;
+
         // 1) Try native fetch first
         try {
             const r = await _fetch(url);
@@ -927,8 +1010,31 @@
         } catch(e) {
             log(`⚠ fetch error for ${filename}: ${e.message}`);
         }
+
+        // 2) Fallback: GM_xmlhttpRequest (bypasses CORS / VPN issues) — Tampermonkey only
+        if (!blob && ENV.isTM && typeof GM_xmlhttpRequest === 'function') {
+            log(`↻ Retry via GM_xmlhttpRequest: ${filename}`);
+            try {
+                blob = await new Promise((resolve, reject) => {
+                    GM_xmlhttpRequest({
+                        method: 'GET', url,
+                        responseType: 'blob',
+                        onload:    (r) => r.status >= 200 && r.status < 300
+                                         ? resolve(r.response) : reject(new Error(`GM ${r.status}`)),
+                        onerror:   (e) => reject(new Error(e?.error || 'GM network error')),
+                        ontimeout: ()  => reject(new Error('GM timeout')),
+                    });
+                });
+            } catch(e) {
+                log(`⚠ GM fallback failed for ${filename}: ${e.message}`);
+            }
+        }
+
         if (!blob) return false;
-        // 2) Write blob to chosen folder (auto-truncate on path-too-long errors)
+        return saveBlobFS(blob, filename, dir);
+    }
+
+    async function saveBlobFS(blob, filename, dir) {
         for (let maxLen = filename.length; maxLen >= 40; maxLen = Math.min(maxLen - 30, Math.floor(maxLen * 0.7))) {
             const fn = truncFilename(filename, maxLen);
             try {
@@ -970,41 +1076,352 @@
         return false;
     }
 
-    // Fallback download via anchor click (used when File System API unavailable)
-    async function downloadFileGM(url, subfolder, filename) {
+    function downloadFileGM(url, subfolder, filename) {
+        if (ENV.isTM) {
+            // Tampermonkey: GM_download with subfolder support
+            return new Promise(resolve => {
+                const name = subfolder ? `${subfolder}/${filename}` : filename;
+                GM_download({
+                    url, name, saveAs: false,
+                    onload:    ()  => resolve(true),
+                    onerror:   (e) => { log(`GM err: ${e?.error || 'unknown'}`); resolve(false); },
+                    ontimeout: ()  => { log('GM timeout'); resolve(false); },
+                });
+            });
+        }
+        // Chrome: anchor/blob fallback (no subfolder support)
+        return (async () => {
+            try {
+                const r = await _fetch(url);
+                if (!r.ok) return false;
+                let blob = await r.blob();
+                const blobUrl = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = blobUrl;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(blobUrl);
+                blob = null;
+                return true;
+            } catch(e) {
+                log('Anchor download error: ' + e.message);
+                return false;
+            }
+        })();
+    }
+
+    function downloadBlobGM(blob, subfolder, filename) {
+        const name = subfolder ? `${subfolder}/${filename}` : filename;
+        if (ENV.isTM) {
+            return new Promise(resolve => {
+                const url = URL.createObjectURL(blob);
+                GM_download({
+                    url, name, saveAs: false,
+                    onload:   () => { URL.revokeObjectURL(url); resolve(true); },
+                    onerror:  (e) => { URL.revokeObjectURL(url); log(`GM err: ${e?.error || 'unknown'}`); resolve(false); },
+                    ontimeout:() => { URL.revokeObjectURL(url); log('GM timeout'); resolve(false); },
+                });
+            });
+        }
+        // Chrome: anchor fallback (no subfolder support)
         try {
-            const r = await _fetch(url);
-            if (!r.ok) return false;
-            const blob    = await r.blob();
             const blobUrl = URL.createObjectURL(blob);
-            const a       = document.createElement('a');
-            a.href        = blobUrl;
-            a.download    = filename; // subfolders not supported via anchor
+            const a = document.createElement('a');
+            a.href = blobUrl;
+            a.download = filename;
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
-            setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
-            return true;
+            URL.revokeObjectURL(blobUrl);
+            return Promise.resolve(true);
         } catch(e) {
             log('Anchor download error: ' + e.message);
-            return false;
+            return Promise.resolve(false);
         }
     }
 
-    async function downloadTextFileGM(content, subfolder, filename) {
+    // =====================================================================
+    // WATERMARK REMOVAL — proxy helpers + fetch logic
+    // =====================================================================
+    function extractMaybeSharedVideoId(value) {
+        if (typeof value !== 'string') return null;
+        const trimmed = value.trim();
+        if (!trimmed) return null;
+        if (SHARED_VIDEO_ID_PATTERN.test(trimmed)) return trimmed;
+        const match = trimmed.match(/(s_[A-Za-z0-9_-]+)/);
+        return match?.[1] ?? null;
+    }
+
+    function getExpectedVideoSizeBytesFromSource(source) {
+        const candidates = [
+            source?.size_bytes,
+            source?.sizeBytes,
+            source?.byte_size,
+            source?.byteSize,
+            source?.bytes,
+            source?.file_size,
+            source?.fileSize,
+            source?.content_length,
+            source?.contentLength,
+            source?.encodings?.source?.size_bytes,
+            source?.encodings?.source?.sizeBytes,
+            source?.encodings?.source?.byte_size,
+            source?.encodings?.source?.content_length,
+        ];
+        for (const value of candidates) {
+            const n = Number(value);
+            if (Number.isFinite(n) && n > 0) return Math.round(n);
+        }
+        return null;
+    }
+
+    function getWatermarkProxyVideoId(item, directUrl) {
+        const raw  = item?._raw ?? null;
+        const post = raw?.post ?? null;
+        const att  = (post?.attachments ?? [])[0] ?? null;
+        const candidates = [
+            item?.videoId,
+            item?.genId,
+            raw?.id,
+            raw?.video_id,
+            raw?.videoId,
+            raw?.generation_id,
+            raw?.generationId,
+            post?.video_id,
+            post?.videoId,
+            att?.id,
+            att?.video_id,
+            att?.videoId,
+            att?.generation_id,
+            att?.generationId,
+            directUrl,
+            item?.downloadUrl,
+            item?.previewUrl,
+            raw?.url,
+            att?.downloadable_url,
+            att?.download_urls?.watermark,
+            att?.download_urls?.no_watermark,
+            att?.encodings?.source?.path,
+            att?.encodings?.source?.url,
+            att?.url,
+        ];
+        for (const candidate of candidates) {
+            const videoId = extractMaybeSharedVideoId(candidate);
+            if (videoId) return videoId;
+        }
+        return null;
+    }
+
+    function getWatermarkExpectedSizeBytes(item) {
+        const raw  = item?._raw ?? null;
+        const post = raw?.post ?? null;
+        const att  = (post?.attachments ?? [])[0] ?? null;
+        return item?.expectedSizeBytes
+            ?? getExpectedVideoSizeBytesFromSource(raw)
+            ?? getExpectedVideoSizeBytesFromSource(att)
+            ?? null;
+    }
+
+    function isWatermarkRemovalSourceSupported(item) {
+        return item?.source === 'v2_profile' || item?.source === 'v2_liked' || item?.source === 'v2_cameos';
+    }
+
+    function isWatermarkProxyEligible(item, directUrl) {
+        return watermarkRemovalEnabled
+            && !watermarkProxyDisabled
+            && item?.mode === 'v2'
+            && isWatermarkRemovalSourceSupported(item)
+            && getFileExt(item) === '.mp4'
+            && !!getWatermarkProxyVideoId(item, directUrl);
+    }
+
+    function clampRetryMs(value) {
+        return Math.min(WATERMARK_FETCH_MAX_RETRY_MS, Math.max(800, Math.round(value)));
+    }
+
+    function jitterMs(maxJitterMs) {
+        return Math.floor(Math.random() * maxJitterMs);
+    }
+
+    function resolveRetryDelayMs(response, attempt, rateLimitStreak) {
+        const retryAfterSeconds = Number(response.headers.get('retry-after'));
+        if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
+            return clampRetryMs(retryAfterSeconds * 1000 + jitterMs(400));
+        }
+        const exponentialMultiplier = Math.max(1, Math.min(6, attempt + 1 + rateLimitStreak));
+        return clampRetryMs(WATERMARK_FETCH_BASE_RETRY_MS * exponentialMultiplier + jitterMs(500));
+    }
+
+    function isRetryableWatermarkStatus(status) {
+        // 408 = soravdl upstream timeout — infrastructure-wide, retrying the same request won't help.
+        // Caller must fast-fail and disable the proxy for the session.
+        return status === 425 || status === 429 || (status >= 500 && status < 600);
+    }
+
+    function shouldFallbackToSourceDownload(byteLength, expectedSizeBytes) {
+        if (byteLength < MIN_VIDEO_BYTES_FALLBACK_THRESHOLD) return true;
+        if (expectedSizeBytes && expectedSizeBytes > 0) {
+            return byteLength < expectedSizeBytes * ESTIMATED_SIZE_FALLBACK_RATIO;
+        }
+        return false;
+    }
+
+    function isLikelyVideoPayload(bytes) {
+        if (!(bytes instanceof Uint8Array) || bytes.length < 12) return false;
+        const isMp4  = bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70;
+        const isWebM = bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3;
+        return isMp4 || isWebM;
+    }
+
+    function getVideoMimeType(bytes) {
+        if (bytes?.[4] === 0x66 && bytes?.[5] === 0x74 && bytes?.[6] === 0x79 && bytes?.[7] === 0x70) return 'video/mp4';
+        if (bytes?.[0] === 0x1a && bytes?.[1] === 0x45 && bytes?.[2] === 0xdf && bytes?.[3] === 0xa3) return 'video/webm';
+        return 'application/octet-stream';
+    }
+
+    async function fetchWatermarkFreeVideoBytes(videoId, expectedSizeBytes, setPhase) {
+        if (!SHARED_VIDEO_ID_PATTERN.test(videoId)) {
+            throw new Error(`Video ID ${videoId} is not eligible for watermark removal.`);
+        }
+
+        const proxyUrl = `https://soravdl.com/api/proxy/video/${encodeURIComponent(videoId)}`;
+        let lastError = null;
+
+        for (let attempt = 1; attempt <= WATERMARK_FETCH_MAX_ATTEMPTS; attempt++) {
+            setPhase?.(attempt === 1 ? 'Removing watermark via soravdl.com…' : `Removing watermark via soravdl.com (retry ${attempt})…`);
+            const cooldownMs = globalRateLimitCooldownUntilMs - Date.now();
+            if (cooldownMs > 0) await sleep(cooldownMs);
+
+            let response;
+            try {
+                response = await _fetch(proxyUrl, {
+                    method: 'GET',
+                    headers: { accept: 'video/*,*/*;q=0.8' },
+                });
+            } catch(e) {
+                lastError = e instanceof Error ? e : new Error(String(e));
+                if (attempt >= WATERMARK_FETCH_MAX_ATTEMPTS) break;
+                const retryMs = clampRetryMs(WATERMARK_FETCH_BASE_RETRY_MS * attempt + jitterMs(250));
+                log(`Proxy retry ${attempt}/${WATERMARK_FETCH_MAX_ATTEMPTS} for ${videoId} in ${retryMs} ms`);
+                await sleep(retryMs);
+                continue;
+            }
+
+            if (response.status === 429) {
+                watermarkRateLimitStreak++;
+                const retryMs = resolveRetryDelayMs(response, attempt, watermarkRateLimitStreak);
+                globalRateLimitCooldownUntilMs = Date.now() + retryMs;
+                lastError = new Error(`Proxy rate limited (${response.status})`);
+                if (attempt >= WATERMARK_FETCH_MAX_ATTEMPTS) break;
+                setPhase?.(`Proxy rate-limited — waiting ${Math.round(retryMs / 1000)}s…`);
+                log(`Proxy rate limited for ${videoId}; retrying in ${retryMs} ms`);
+                await sleep(retryMs);
+                continue;
+            }
+
+            globalRateLimitCooldownUntilMs = 0;
+            watermarkRateLimitStreak = 0;
+
+            if (!response.ok) {
+                let detail = '';
+                try { const j = await response.clone().json(); detail = j.message || j.error || ''; } catch(_) {}
+                const statusLabel = detail ? `${response.status} — ${detail}` : `${response.status}`;
+                lastError = new Error(`Proxy responded with ${statusLabel}`);
+                // 408 = soravdl upstream timeout; infrastructure-wide, no point retrying
+                if (response.status === 408 || !isRetryableWatermarkStatus(response.status) || attempt >= WATERMARK_FETCH_MAX_ATTEMPTS) break;
+                const retryMs = clampRetryMs(WATERMARK_FETCH_BASE_RETRY_MS * attempt + jitterMs(250));
+                log(`Proxy retry ${attempt}/${WATERMARK_FETCH_MAX_ATTEMPTS} for ${videoId} after HTTP ${response.status}`);
+                await sleep(retryMs);
+                continue;
+            }
+
+            const bytes = new Uint8Array(await response.arrayBuffer());
+            if (!isLikelyVideoPayload(bytes)) {
+                throw new Error('Proxy returned a non-video payload.');
+            }
+            if (shouldFallbackToSourceDownload(bytes.length, expectedSizeBytes)) {
+                throw new Error(`Proxy payload too small (${bytes.length} bytes).`);
+            }
+            return bytes;
+        }
+
+        throw lastError ?? new Error(`Watermark proxy failed for ${videoId}`);
+    }
+
+    async function fetchWatermarkFreeVideoBlob(item, directUrl, setPhase) {
+        const videoId = getWatermarkProxyVideoId(item, directUrl);
+        if (!videoId) throw new Error('No shared Sora video ID found for proxy download.');
+        const bytes = await fetchWatermarkFreeVideoBytes(videoId, getWatermarkExpectedSizeBytes(item), setPhase);
+        return new Blob([bytes], { type: getVideoMimeType(bytes) });
+    }
+
+    async function downloadWithCurrentSolution(url, filename, item, dir, setPhase) {
+        const lbl = SCAN_SOURCES.find(s => s.id === item.sourceId)?.label ?? '';
+        setPhase?.(`⬇ ${lbl}`);
+        if (dlMethod === 'fs') return downloadFileFS(url, filename, dir);
+        return downloadFileGM(url, getSubfolderName(item), filename);
+    }
+
+    async function downloadMediaWithWatermarkProxyFallback(item, url, filename, dir, setPhase) {
+        if (!isWatermarkProxyEligible(item, url)) {
+            return downloadWithCurrentSolution(url, filename, item, dir, setPhase);
+        }
+
+        const videoId = getWatermarkProxyVideoId(item, url);
         try {
-            const blob    = new Blob([content], { type: 'text/plain;charset=utf-8' });
+            const blob = await fetchWatermarkFreeVideoBlob(item, url, setPhase);
+            log(`Proxy download succeeded: ${videoId}`);
+            if (dlMethod === 'fs') return saveBlobFS(blob, filename, dir);
+            return downloadBlobGM(blob, getSubfolderName(item), filename);
+        } catch(e) {
+            watermarkProxyFailureCount++;
+            const message = e instanceof Error ? e.message : String(e);
+            const is408 = message.includes('408');
+            const srcLabel = SCAN_SOURCES.find(s => s.id === item.sourceId)?.label ?? '';
+            setPhase?.(`⬇ ${srcLabel} (direct)`);
+            log(`Proxy failed for ${videoId}: ${message}; falling back to OpenAI download`);
+            if (!watermarkProxyDisabled && (is408 || watermarkProxyFailureCount >= WATERMARK_PROXY_FAILURE_LIMIT)) {
+                watermarkProxyDisabled = true;
+                const reason = is408 ? 'upstream timeout (408)' : `${watermarkProxyFailureCount} consecutive failures`;
+                log(`Proxy disabled after ${reason}; continuing with OpenAI downloads only`);
+            }
+            showActivityWarning(watermarkProxyDisabled
+                ? 'Watermark removal not available — turned off for this session'
+                : 'Watermark removal not available — using original file');
+            return downloadWithCurrentSolution(url, filename, item, dir, setPhase);
+        }
+    }
+
+    function downloadTextFileGM(content, subfolder, filename) {
+        if (ENV.isTM) {
+            return new Promise(resolve => {
+                const name = subfolder ? `${subfolder}/${filename}` : filename;
+                const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+                const dataUrl = URL.createObjectURL(blob);
+                GM_download({
+                    url: dataUrl, name, saveAs: false,
+                    onload:    () => { URL.revokeObjectURL(dataUrl); resolve(true); },
+                    onerror:   () => { URL.revokeObjectURL(dataUrl); resolve(false); },
+                    ontimeout: () => { URL.revokeObjectURL(dataUrl); resolve(false); },
+                });
+            });
+        }
+        // Chrome: anchor fallback
+        try {
+            const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
             const blobUrl = URL.createObjectURL(blob);
-            const a       = document.createElement('a');
-            a.href        = blobUrl;
-            a.download    = filename;
+            const a = document.createElement('a');
+            a.href = blobUrl;
+            a.download = filename;
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
-            setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
-            return true;
+            URL.revokeObjectURL(blobUrl);
+            return Promise.resolve(true);
         } catch(e) {
-            return false;
+            return Promise.resolve(false);
         }
     }
 
@@ -1159,6 +1576,41 @@
     }
 
     // =====================================================================
+    // WATERMARK ESTIMATE BADGE
+    // =====================================================================
+    function formatWatermarkEstimateLabel(minSeconds, maxSeconds) {
+        if (maxSeconds <= 0) return '+0 min';
+        const minMinutes = Math.max(1, Math.ceil(minSeconds / 60));
+        const maxMinutes = Math.max(minMinutes, Math.ceil(maxSeconds / 60));
+        return minMinutes === maxMinutes
+            ? `+${maxMinutes} min`
+            : `+${minMinutes}-${maxMinutes} min`;
+    }
+
+    function updateWatermarkEstimateBadge() {
+        const badge = document.getElementById('sdl-watermark-estimate');
+        if (!badge) return;
+
+        const saveMedia = readConfigBool('SAVE_MEDIA', true);
+        const watermarkEnabled = readConfigBool('WATERMARK_REMOVAL', true);
+        if (!saveMedia || !watermarkEnabled) {
+            badge.textContent = 'off';
+            badge.classList.add('off');
+            return;
+        }
+
+        const eligibleCount = getFilteredItems().filter(item =>
+            item?.mode === 'v2'
+            && isWatermarkRemovalSourceSupported(item)
+            && getFileExt(item) === '.mp4'
+            && !!getWatermarkProxyVideoId(item, item?.downloadUrl ?? null)
+        ).length;
+
+        badge.textContent = formatWatermarkEstimateLabel(eligibleCount * 10, eligibleCount * 20);
+        badge.classList.remove('off');
+    }
+
+    // =====================================================================
     // DOWNLOAD
     // =====================================================================
     async function startDownload() {
@@ -1169,6 +1621,7 @@
         const saveMedia = readConfigBool('SAVE_MEDIA', true);
         const saveTxt   = readConfigBool('DOWNLOAD_TXT', CFG.DOWNLOAD_TXT);
         const saveJSON  = readConfigBool('SAVE_JSON', false);
+        watermarkRemovalEnabled = readConfigBool('WATERMARK_REMOVAL', true);
 
         if (!saveMedia && !saveTxt && !saveJSON) {
             showToast('Enable at least one output format ↑');
@@ -1176,7 +1629,7 @@
         }
 
         const hasFS = typeof window.showDirectoryPicker === 'function';
-        const hasGM = false; // Chrome extension: anchor download fallback only
+        const hasGM = ENV.hasGM;
 
         baseDir = null;
 
@@ -1191,10 +1644,12 @@
                 }
             } else if (hasGM) {
                 dlMethod = 'gm';
-                log('ℹ Folder picker not available — using anchor download fallback');
+                log(ENV.isTM
+                    ? 'ℹ Folder picker not available — using Tampermonkey downloads'
+                    : 'ℹ Folder picker not available — using anchor download fallback');
             } else {
                 log('⚠ No download method available (use Chrome/Edge).');
-                setStatus('File System API unavailable — use Chrome 86+ — see log');
+                setStatus('Chrome/Edge required for folder picker — see log');
                 return;
             }
         }
@@ -1206,6 +1661,10 @@
         lastSaveMedia  = saveMedia;
         lastSaveJSON   = saveJSON;
         lastFilterSnap = snapshotActiveFilters();
+        watermarkProxyDisabled = !watermarkRemovalEnabled;
+        watermarkProxyFailureCount = 0;
+        globalRateLimitCooldownUntilMs = 0;
+        watermarkRateLimitStreak = 0;
 
         const word = getContentWord();
         let logParts = [`Downloading ${totalToDownload} ${word}`];
@@ -1233,11 +1692,24 @@
         let idx = 0;
 
         async function worker() {
+            let prevI = null;
             while (idx < items.length && !stopRequested) {
                 const i = idx++, item = items[i];
+
+                // Clean up previous item's entry at start of next — eliminates the empty-line gap
+                if (prevI !== null) { workerActivities.delete(prevI); scheduleActivityRender(); }
+                prevI = i;
+
                 const base = buildBase(item);
                 const ext  = getFileExt(item);
                 log(`[${i+1}/${totalToDownload}] ${base.slice(0, 55)}…`);
+
+                const srcLabel = SCAN_SOURCES.find(s => s.id === item.sourceId)?.label ?? '';
+                const setPhase = phrase => {
+                    phrase ? workerActivities.set(i, phrase) : workerActivities.delete(i);
+                    scheduleActivityRender();
+                };
+                setPhase(`⬇ ${srcLabel}`);
 
                 let mediaOk = true;
 
@@ -1249,12 +1721,8 @@
                         updateDownloadProgress(dlStart);
                         continue;
                     }
-                    if (dlMethod === 'fs') {
-                        const targetDir = await getSubDir(item);
-                        mediaOk = await downloadFileFS(url, base + ext, targetDir);
-                    } else {
-                        mediaOk = await downloadFileGM(url, getSubfolderName(item), base + ext);
-                    }
+                    const targetDir = dlMethod === 'fs' ? await getSubDir(item) : null;
+                    mediaOk = await downloadMediaWithWatermarkProxyFallback(item, url, base + ext, targetDir, setPhase);
                 }
 
                 if (saveTxt) {
@@ -1278,6 +1746,8 @@
                 updateDownloadProgress(dlStart);
                 await sleep(SPEED_PRESETS[speedIdx].delay);
             }
+            // Clean up last item when worker exits loop
+            if (prevI !== null) { workerActivities.delete(prevI); scheduleActivityRender(); }
         }
 
         while (idx < items.length && !stopRequested) {
@@ -1289,6 +1759,11 @@
         }
 
         isRunning = false;
+        workerActivities.clear();
+        renderActivityLine();
+        if (activityWarningTimer) { clearTimeout(activityWarningTimer); activityWarningTimer = null; }
+        const actRightEl = document.getElementById('sdl-activity-right');
+        if (actRightEl) actRightEl.textContent = '';
 
         if (stopRequested) {
             log(`Stopped — ${completedCount} saved, ${failedCount} failed`);
@@ -1299,6 +1774,17 @@
                 log('Saving JSON manifest…');
                 await exportJSON(true);
                 showToast('JSON manifest saved ✓');
+            }
+            // Save download log
+            const logEl = document.getElementById('sdl-log');
+            if (logEl && logEl.textContent.trim()) {
+                const logFilename = `SoraVault_log_${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
+                if (dlMethod === 'fs' && baseDir) {
+                    await downloadTextFileFS(logEl.textContent, logFilename, baseDir);
+                } else if (dlMethod === 'gm' && ENV.isTM) {
+                    await downloadTextFileGM(logEl.textContent, null, logFilename);
+                }
+                log('Download log saved ✓');
             }
             log(`All done — ${completedCount} saved${failedCount > 0 ? `, ${failedCount} failed` : ''} ✓`);
             showEndScreen(saveTxt, saveMedia, saveJSON);
@@ -1370,7 +1856,7 @@
             scanning:    'API scan running — stop anytime to download what\'s found',
             ready:       '',
             downloading: dlMethod === 'gm'
-                ? 'Saving via browser download → default Downloads folder'
+                ? 'Saving via Tampermonkey → default Downloads folder'
                 : 'Saving files to your folder…',
             done: '',
         }[s] || '');
@@ -1388,7 +1874,7 @@
     function resetFilters() {
         filters.keyword = ''; filters.ratios.clear(); filters.dateFrom = ''; filters.dateTo = '';
         filters.qualities.clear(); filters.operations.clear(); filters.nItems = ''; filters.nDirection = 'last';
-        filters.authorExclude = '';
+        filters.authorExclude = ''; filters.filterSources.clear(); filters.onlyFavorites = false;
     }
 
     function resetFilterInputs() {
@@ -1399,24 +1885,66 @@
         syncNDirButtons();
     }
 
-    function rebuildAllChips() {
-        rebuildChips('sdl-f-v1-ratios',     'ratios',     getDistinctValuesByMode('ratio', 'v1'));
-        rebuildChips('sdl-f-v1-qualities',  'qualities',  getDistinctValuesByMode('quality', 'v1'));
-        rebuildChips('sdl-f-v1-operations', 'operations', getDistinctValuesByMode('operation', 'v1'));
-        rebuildChips('sdl-f-v2-ratios',     'ratios',     getDistinctValuesByMode('ratio', 'v2'));
-        rebuildChips('sdl-f-v2-qualities',  'qualities',  getDistinctValuesByMode('quality', 'v2'));
+    function rebuildSourceChips() {
+        const container = document.getElementById('sdl-f-sources');
+        if (!container) return;
+        container.innerHTML = '';
+
+        // Only show sources that actually have items after the scan
+        const presentSources = SCAN_SOURCES.filter(src =>
+            [...collected.values()].some(i => i.source === src.id)
+        );
+
+        if (presentSources.length <= 1) {
+            container.innerHTML = '<span class="sdl-chip-empty">—</span>';
+            return;
+        }
+
+        presentSources.forEach(src => {
+            const chip = document.createElement('button');
+            chip.className = 'sdl-chip';
+            chip.textContent = SOURCE_LABELS[src.id] || src.id;
+            if (filters.filterSources.has(src.id)) chip.classList.add('active');
+            chip.addEventListener('click', () => {
+                filters.filterSources.has(src.id)
+                    ? filters.filterSources.delete(src.id)
+                    : filters.filterSources.add(src.id);
+                chip.classList.toggle('active', filters.filterSources.has(src.id));
+                rebuildAllChips();     // re-evaluate dim state on sub-filter chips
+                recomputeSelection();
+            });
+            container.appendChild(chip);
+        });
     }
 
-    function rebuildChips(containerId, filterKey, values) {
+    function rebuildAllChips() {
+        rebuildSourceChips();
+        rebuildChips('sdl-f-v1-ratios',     'ratios',     getDistinctValuesByModeFiltered('ratio', 'v1'));
+        rebuildChips('sdl-f-v1-qualities',  'qualities',  getDistinctValuesByModeFiltered('quality', 'v1'));
+        rebuildChips('sdl-f-v1-operations', 'operations', getDistinctValuesByModeFiltered('operation', 'v1'));
+        rebuildChips('sdl-f-v2-ratios',     'ratios',     getDistinctValuesByModeFiltered('ratio', 'v2'));
+        rebuildChips('sdl-f-v2-qualities',  'qualities',  getDistinctValuesByModeFiltered('quality', 'v2'));
+    }
+
+    function rebuildChips(containerId, filterKey, availableValues) {
         const container = document.getElementById(containerId);
         if (!container) return;
         container.innerHTML = '';
-        if (!values.length) { container.innerHTML = '<span class="sdl-chip-empty">—</span>'; return; }
-        values.forEach(val => {
+
+        // Append any selected values that are no longer available (show dimmed so the
+        // user can see their selection is preserved, ready to un-dim when re-enabled).
+        const unavailableSelected = [...filters[filterKey]].filter(v => !availableValues.includes(v));
+        const allValues = [...availableValues, ...unavailableSelected];
+
+        if (!allValues.length) { container.innerHTML = '<span class="sdl-chip-empty">—</span>'; return; }
+
+        allValues.forEach(val => {
+            const available = availableValues.includes(val);
             const chip = document.createElement('button');
             chip.className = 'sdl-chip';
             chip.textContent = val;
             if (filters[filterKey].has(val)) chip.classList.add('active');
+            if (!available) chip.classList.add('dim');
             chip.addEventListener('click', () => {
                 filters[filterKey].has(val) ? filters[filterKey].delete(val) : filters[filterKey].add(val);
                 chip.classList.toggle('active', filters[filterKey].has(val));
@@ -1455,6 +1983,7 @@
                 : `Download Selection  (${selected})`;
         }
         updateFilterBadge();
+        updateWatermarkEstimateBadge();
     }
 
     function updateFilterBadge() {
@@ -1463,7 +1992,8 @@
         const count = (filters.keyword.trim() ? 1 : 0) + (filters.nItems.trim() ? 1 : 0)
             + filters.ratios.size + filters.qualities.size + filters.operations.size
             + (filters.dateFrom ? 1 : 0) + (filters.dateTo ? 1 : 0)
-            + (filters.authorExclude.trim() ? 1 : 0);
+            + (filters.authorExclude.trim() ? 1 : 0)
+            + filters.filterSources.size + (filters.onlyFavorites ? 1 : 0);
         badge.textContent = count > 0 ? `${count} active` : 'none active';
         badge.classList.toggle('active', count > 0);
     }
@@ -1481,6 +2011,40 @@
         if (!el) return;
         el.textContent   = text;
         el.style.display = text ? '' : 'none';
+    }
+
+    function renderActivityLine() {
+        const el = document.getElementById('sdl-activity-left');
+        if (!el) return;
+        if (workerActivities.size === 0) {
+            el.textContent = '\u00A0';
+            el.classList.remove('sdl-activity-pulse');
+            return;
+        }
+        const counts = new Map();
+        for (const phrase of workerActivities.values())
+            counts.set(phrase, (counts.get(phrase) || 0) + 1);
+        el.textContent = [...counts.entries()]
+            .map(([p, n]) => n > 1 ? `${p} ×${n}` : p)
+            .join(' · ');
+        const hasSlow = [...workerActivities.values()].some(p => p.includes('soravdl') || p.includes('rate-limited'));
+        el.classList.toggle('sdl-activity-pulse', hasSlow);
+    }
+
+    function scheduleActivityRender() {
+        if (activityRenderTimer) return;
+        activityRenderTimer = setTimeout(() => { activityRenderTimer = null; renderActivityLine(); }, 120);
+    }
+
+    function showActivityWarning(text) {
+        const el = document.getElementById('sdl-activity-right');
+        if (!el) return;
+        if (activityWarningTimer) clearTimeout(activityWarningTimer);
+        el.textContent = text;
+        activityWarningTimer = setTimeout(() => {
+            el.textContent = '';
+            activityWarningTimer = null;
+        }, 10000);
     }
 
     function updateDownloadProgress(dlStart) {
@@ -1529,7 +2093,7 @@
         speedIdx = i;
         document.querySelectorAll('.sdl-speed-seg').forEach(el =>
             el.classList.toggle('active', parseInt(el.dataset.spd) === i));
-        const hints   = ['2 workers · 300 ms delay · safe', '4 workers · 150 ms delay · aggressive', '8 workers · 60 ms delay · ban risk!'];
+        const hints   = ['2 workers · 60 ms delay · safe', '4 workers · 150 ms delay · aggressive', '8 workers · 60 ms delay · temp block possible!'];
         const classes = ['', 'warn', 'danger'];
         document.querySelectorAll('.sdl-speed-hint').forEach(h => {
             h.textContent = hints[i]; h.className = 'sdl-speed-hint ' + classes[i];
@@ -1774,14 +2338,14 @@
 #sdl-counter-pill.flash { animation:sdlFlash 0.3s ease; }
 @keyframes sdlFlash { 0%,100%{opacity:1} 50%{opacity:0.55} }
 
-/* Filter disclosure — more prominent */
+/* Filter disclosure */
 .sdl-disc {
   display:flex; align-items:center; gap:7px; cursor:pointer; margin-bottom:8px;
-  font-size:12px; font-weight:500; color:rgba(255,255,255,0.42); user-select:none;
-  transition:color 0.15s; padding:6px 0;
+  font-size:12px; font-weight:600; color:rgba(255,255,255,0.65); user-select:none;
+  transition:color 0.15s; padding:8px 0;
 }
-.sdl-disc:hover { color:rgba(255,255,255,0.7); }
-.sdl-disc-line { flex:1; height:0.5px; background:rgba(255,255,255,0.09); }
+.sdl-disc:hover { color:rgba(255,255,255,0.9); }
+.sdl-disc-line { flex:1; height:0.5px; background:rgba(255,255,255,0.14); }
 .sdl-disc-badge {
   font-size:9.5px; padding:2px 8px; border-radius:20px; background:rgba(255,255,255,0.07);
   color:rgba(255,255,255,0.35); transition:background 0.2s,color 0.2s; font-weight:400;
@@ -1837,7 +2401,13 @@
 }
 .sdl-chip:hover { background:rgba(255,255,255,0.1); color:rgba(255,255,255,0.7); }
 .sdl-chip.active { background:rgba(99,102,241,0.18); border-color:rgba(99,102,241,0.35); color:rgba(165,170,255,0.9); }
+.sdl-chip.dim { opacity:0.32; text-decoration:line-through; }
+.sdl-chip.active.dim { background:rgba(99,102,241,0.10); border-color:rgba(99,102,241,0.20); }
 .sdl-chip-empty { font-size:11px; color:rgba(255,255,255,0.15); font-style:italic; }
+/* Favorites-only toggle chip — amber/gold when active */
+.sdl-chip-star { width:100%; padding:4px 10px; margin-bottom:2px; }
+.sdl-chip-star.active { background:rgba(202,152,42,0.2); border-color:rgba(202,152,42,0.5); color:rgba(255,210,80,0.95); }
+.sdl-chip-star:not(.active):hover { background:rgba(202,152,42,0.08); border-color:rgba(202,152,42,0.2); color:rgba(255,210,80,0.6); }
 #sdl-filter-reset {
   display:block; font-size:10.5px; color:rgba(255,255,255,0.22); cursor:pointer;
   text-align:right; margin-top:4px; text-decoration:none;
@@ -1923,6 +2493,23 @@
 }
 #sdl-log::-webkit-scrollbar { width:3px; }
 #sdl-log::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.1); border-radius:2px; }
+#sdl-activity-line {
+  display:flex; justify-content:space-between; align-items:center;
+  font-size:10px; min-height:13px; margin:3px 0 2px; letter-spacing:0.01em;
+}
+#sdl-activity-left {
+  color:rgba(255,255,255,0.4); flex:1; overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap;
+}
+#sdl-activity-right {
+  color:rgba(251,191,36,0.85); flex-shrink:0; margin-left:10px;
+  font-size:9.5px; white-space:nowrap;
+}
+@keyframes sdl-pulse-opacity {
+  0%,100% { opacity:0.45; }
+  50%      { opacity:1;    }
+}
+.sdl-activity-pulse { animation:sdl-pulse-opacity 1.4s ease-in-out infinite; }
 
 /* Scan story */
 #sdl-scan-story {
@@ -1987,6 +2574,16 @@
 }
 #sdl-toast.tin  { opacity:1; transform:translateY(0); }
 #sdl-toast.tout { opacity:0; transform:translateY(8px); }
+
+/* Watermark estimate badge */
+.sdl-export-badge {
+  font-size:10px; font-weight:700; letter-spacing:0.01em; white-space:nowrap;
+  padding:3px 8px; border-radius:999px;
+  background:rgba(255,221,0,0.18); color:#ffdd00; border:0.5px solid rgba(255,221,0,0.32);
+}
+.sdl-export-badge.off {
+  background:rgba(255,255,255,0.06); color:rgba(255,255,255,0.35); border-color:rgba(255,255,255,0.1);
+}
 `;
 
     // =====================================================================
@@ -2008,10 +2605,10 @@
         p.innerHTML = `
 <div id="sdl-header">
   <img id="sdl-logo"
-       src="${LOGO_URL}"
+       src="${ENV.LOGO_URL}"
        alt="SoraVault" referrerpolicy="no-referrer">
   <span id="sdl-logo-fb">🔐</span>
-  <span id="sdl-title">SoraVault 2.0</span>
+  <span id="sdl-title">SoraVault 2.5</span>
   <span id="sdl-update-badge"></span>
   <div id="sdl-header-right">
         
@@ -2051,7 +2648,7 @@
           <input type="checkbox" id="sdl-src-cb-v1_liked" checked>
           <span class="sdl-src-icon">♡</span>
           <span class="sdl-src-name">Likes</span>
-          <span class="sdl-src-sub">V1 favorites</span>
+          <span class="sdl-src-sub">V1 liked content</span>
         </label>
       </div>
 
@@ -2084,13 +2681,13 @@
           <input type="checkbox" id="sdl-src-cb-v2_cameos" checked>
           <span class="sdl-src-icon">👤</span>
           <span class="sdl-src-name">Cameos</span>
-          <span class="sdl-src-sub">V2 cameos</span>
+          <span class="sdl-src-sub">V2 posts featuring you</span>
         </label>
         <label class="sdl-src-row" id="sdl-src-row-v2_cameo_drafts">
           <input type="checkbox" id="sdl-src-cb-v2_cameo_drafts" checked>
           <span class="sdl-src-icon">👤📋</span>
           <span class="sdl-src-name">Cameo drafts</span>
-          <span class="sdl-src-sub">V2 cameo drafts</span>
+          <span class="sdl-src-sub">V2 drafts featuring you</span>
         </label>
       </div>
 
@@ -2099,7 +2696,7 @@
     <div id="sdl-src-note">Works from any Sora page · no scrolling needed</div>
     <button class="sdl-btn sdl-btn-primary" id="sdl-scan">Scan All</button>
     <div style="font-size:10px;color:rgba(255,255,255,0.16);text-align:center;margin-top:6px;line-height:1.5;">
-      Runs as a Chrome Extension · File System API enabled
+      Full support on Chrome &amp; Edge · other browsers use Tampermonkey fallback
     </div>
   </div>
 
@@ -2148,13 +2745,18 @@
           <div class="sdl-toggle-thumb"></div>
         </label>
       </div>
+      <div class="sdl-export-row">
+        <span class="sdl-export-lbl">Watermark Removal<span>Slow. No support for drafts.</span></span>
+        <span class="sdl-export-badge" id="sdl-watermark-estimate">+0 min</span>
+        <label class="sdl-toggle">
+          <input type="checkbox" id="sdl-cfg-WATERMARK_REMOVAL" checked>
+          <div class="sdl-toggle-track"></div>
+          <div class="sdl-toggle-thumb"></div>
+        </label>
+      </div>
     </div>
 
-    <div id="sdl-counter-pill">&#x2014;</div>
-    <button class="sdl-btn sdl-btn-primary"   id="sdl-dl"     disabled>Download All</button>
-    <button class="sdl-btn sdl-btn-secondary" id="sdl-rescan">&#x21ba;&#x2002;Rescan</button>
-
-    <!-- Filter disclosure — more prominent -->
+    <!-- Filter disclosure — above download actions -->
     <div class="sdl-disc" id="sdl-filter-disc">
       <span class="sdl-disc-line"></span>
       <span>&#x1F50D; Filters</span>
@@ -2164,6 +2766,12 @@
     </div>
 
     <div class="sdl-drawer" id="sdl-filter-drawer">
+
+      <!-- Category filter (source) -->
+      <div class="sdl-f-sec">
+        <span class="sdl-f-lbl">Category</span>
+        <div class="sdl-chips" id="sdl-f-sources"></div>
+      </div>
 
       <!-- Keyword (full width) -->
       <div class="sdl-f-sec">
@@ -2195,6 +2803,9 @@
         <!-- V1 — Images -->
         <div>
           <div class="sdl-f-group-hd">📷 Sora 1 · Images</div>
+          <div class="sdl-f-sec">
+            <button class="sdl-chip sdl-chip-star" id="sdl-f-v1-fav">⭐ Favorites only</button>
+          </div>
           <div class="sdl-f-sec">
             <span class="sdl-f-lbl">Aspect ratio</span>
             <div class="sdl-chips" id="sdl-f-v1-ratios"></div>
@@ -2230,6 +2841,10 @@
 
       <a id="sdl-filter-reset">Reset all filters</a>
     </div>
+
+    <div id="sdl-counter-pill">&#x2014;</div>
+    <button class="sdl-btn sdl-btn-primary"   id="sdl-dl"     disabled>Download All</button>
+    <button class="sdl-btn sdl-btn-secondary" id="sdl-rescan">&#x21ba;&#x2002;Rescan</button>
   </div>
 
   <!-- ─── STATE: downloading ───────────────────────────────── -->
@@ -2254,6 +2869,7 @@
       <span class="lbl">downloaded</span>
     </div>
     <div class="sdl-prog"><div class="sdl-prog-bar" id="sdl-dl-bar" style="width:0%"></div></div>
+    <div id="sdl-activity-line"><span id="sdl-activity-left">&nbsp;</span><span id="sdl-activity-right"></span></div>
     <div class="sdl-stats">
       <div class="sdl-stat"><span class="sdl-stat-n" id="sdl-dl-done">0</span><span>done</span></div>
       <div class="sdl-stat-sep"></div>
@@ -2271,10 +2887,10 @@
           <span class="s-icon">&#x25ce;</span><span class="s-lbl">Faster</span><span class="s-risk">Low risk</span>
         </div>
         <div class="sdl-speed-seg spd-rip" data-spd="2">
-          <span class="s-icon">&#x25c9;</span><span class="s-lbl">Very fast</span><span class="s-risk">Ban risk!</span>
+          <span class="s-icon">&#x25c9;</span><span class="s-lbl">Very fast</span><span class="s-risk">Beware: temp block possible</span>
         </div>
       </div>
-      <div class="sdl-speed-hint">2 workers · 300 ms delay · safe</div>
+      <div class="sdl-speed-hint">2 workers · 60 ms delay · safe</div>
     </div>
     <button class="sdl-btn sdl-btn-stop" id="sdl-stop-dl">Stop</button>
   </div>
@@ -2310,7 +2926,6 @@
         ⭐ Star on GitHub
       </a>
       <span class="sdl-done-sep">·</span>
-      <span style="color:rgba(255,255,255,0.18);font-size:10.5px;">Desktop app coming soon</span>
     </div>
     <button class="sdl-btn sdl-btn-secondary" id="sdl-done-back">← Back</button>
   </div>
@@ -2322,15 +2937,15 @@
       📷 V1 Images  → <code style="color:rgba(255,255,255,0.38)">sora_v1_images</code><br>
       🎬 V1 Videos  → <code style="color:rgba(255,255,255,0.38)">sora_v1_videos</code><br>
       ♡  V1 Liked   → <code style="color:rgba(255,255,255,0.38)">sora_v1_liked</code><br>
-      🎬 V2 Profile → <code style="color:rgba(255,255,255,0.38)">sora_v2_profile</code><br>
-      📋 V2 Drafts  → <code style="color:rgba(255,255,255,0.38)">sora_v2_drafts</code><br>
-      ♡  V2 Liked   → <code style="color:rgba(255,255,255,0.38)">sora_v2_liked</code><br>
-      👤 V2 Cameos  → <code style="color:rgba(255,255,255,0.38)">sora_v2_cameos</code><br>
-      👤📋 V2 Cameo drafts → <code style="color:rgba(255,255,255,0.38)">sora_v2_cameo_drafts</code>
+      🎬 V2 Profile       → <code style="color:rgba(255,255,255,0.38)">sora_v2_profile</code><br>
+      📋 V2 Drafts        → <code style="color:rgba(255,255,255,0.38)">sora_v2_drafts</code><br>
+      ♡  V2 Liked         → <code style="color:rgba(255,255,255,0.38)">sora_v2_liked</code><br>
+      👤 V2 Cameos        → <code style="color:rgba(255,255,255,0.38)">sora_v2_cameos</code><br>
+      👤 V2 Cameo drafts  → <code style="color:rgba(255,255,255,0.38)">sora_v2_cameo_drafts</code>
     </div>
     <div style="font-size:9.5px;color:rgba(255,255,255,0.16);line-height:1.6;padding:0 0 4px">
       <strong style="color:rgba(255,255,255,0.25)">Chrome/Edge:</strong> folder picker — you choose where<br>
-      <strong style="color:rgba(255,255,255,0.25)">Fallback:</strong> Browser anchor download → Downloads folder
+      <strong style="color:rgba(255,255,255,0.25)">Firefox/other:</strong> Tampermonkey fallback → Downloads
     </div>
   </div>
 
@@ -2472,14 +3087,22 @@
         document.getElementById('sdl-f-n-items').addEventListener('input',    e => { filters.nItems        = e.target.value; recomputeSelection(); });
         document.getElementById('sdl-f-date-from').addEventListener('change', e => { filters.dateFrom      = e.target.value; recomputeSelection(); });
         document.getElementById('sdl-f-date-to').addEventListener('change',   e => { filters.dateTo        = e.target.value; recomputeSelection(); });
+        document.getElementById('sdl-f-v1-fav').addEventListener('click', () => {
+            filters.onlyFavorites = !filters.onlyFavorites;
+            document.getElementById('sdl-f-v1-fav').classList.toggle('active', filters.onlyFavorites);
+            recomputeSelection();
+        });
         document.getElementById('sdl-filter-reset').addEventListener('click', () => {
             resetFilters(); resetFilterInputs(); recomputeSelection(); rebuildAllChips();
         });
+        document.getElementById('sdl-cfg-SAVE_MEDIA').addEventListener('change', updateWatermarkEstimateBadge);
+        document.getElementById('sdl-cfg-WATERMARK_REMOVAL').addEventListener('change', updateWatermarkEstimateBadge);
 
         // ── Async init ───────────────────────────────────────────────────
         setTimeout(checkForUpdate, 1500);
         updateShutdownBadge();
         updateScanButton();
+        updateWatermarkEstimateBadge();
         setState('init');
 
         // Geo-check: first attempt after page settles, then poll every 10s if blocked or initializing

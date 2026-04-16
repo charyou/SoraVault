@@ -1,4 +1,4 @@
-# <sub><img src="assets/soravault-logo-square.png" height="35"></sub> SoraVault 2.0 – Bulk Export & Backup Tool for OpenAI Sora
+# <sub><img src="assets/soravault-logo-square.png" height="35"></sub> SoraVault 2.5 – Bulk Export & Backup Tool for OpenAI Sora
 
 **Your Sora library is about to disappear. Vault it.**
  
@@ -14,23 +14,26 @@ SoraVault is a free, API-driven tool to bulk export your OpenAI Sora library. Ea
 
 ## ⚡ What makes SoraVault different
 
-| Feature | SoraVault 2.0 | OpenAI Official Export | Manual Download | Other Tools |
+| Feature | SoraVault 2.5 | OpenAI Official Export | Manual Download | Other Tools |
 |---------|-----------|------------------------|-----------------|-------------|
 | FREE | ✅ | ✅ | ✅ | ❌ (only limited) |
 | Videos (Sora v2 — Profile) | ✅ | ✅ (mixed with all ChatGPT data) | ❌ (one by one) | ❌ |
 | Videos (Sora v2 — Draft) | ✅ | ❌ | ❌ (one by one) | ❌ |
 | Images (Sora v1) | ✅ | ✅ (mixed with all ChatGPT data) | ❌ (one by one) | Partial |
-| **NEW: "Liked" Content (v1 & v2)** | ✅ | ❌ | ❌ | ❌ |
+| Liked Content (v1 & v2) | ✅ | ❌ | ❌ | ❌ |
+| Cameos & Cameo Drafts (Sora v2) | ✅ **NEW** | ❌ | ❌ | ❌ |
 | Original quality (full-res renders) | ✅ | ✅ | ✅ | ❌ (compressed) |
+| **Watermark-free downloads** | ✅ **NEW** | ❌ | ❌ | ❌ |
 | Prompt saved as .txt sidecar | ✅ | ❌ | ❌ | ❌ |
-| **NEW: Raw JSON metadata export** | ✅ | ❌ | ❌ | ❌ |
+| Raw JSON metadata export | ✅ | ❌ | ❌ | ❌ |
 | Bulk download (entire library) | ✅ | ✅ (one ZIP, no filters) | ❌ | Partial |
-| Smart filters (author, ratio, quality, date) | ✅ | ❌ | ❌ | ❌ |
+| Smart filters (source, author, ratio, quality, date, favorites) | ✅ | ❌ | ❌ | ❌ |
 | Instant — no waiting period | ✅ | ❌ (days of waiting) | ✅ | ❌ |
 | No link expiry | ✅ | ❌ (link expires in 24h) | ✅ | — |
 | API-Driven (No page scrolling required) | ✅ | — | — | ❌ |
-| Parallel downloads (5x speed) | ✅ | ❌ | ❌ | ❌ |
+| Parallel downloads (up to 8x speed) | ✅ | ❌ | ❌ | ❌ |
 | Granular auto-folder sorting | ✅ | ❌ | ❌ | ❌ |
+| Only Export your Favorites (v1) | ✅ | ❌ | ❌ | ❌ |
 
 ---
 
@@ -46,21 +49,21 @@ SoraVault is a free, API-driven tool to bulk export your OpenAI Sora library. Ea
 
 ## 🚀 Quick Start
 
-### Option A: Tampermonkey Script (Free)
+### Option A: Tampermonkey Script 
 
 1. Install [Tampermonkey](https://tampermonkey.net) for your browser. 
 > **What is Tampermonkey and is it safe?** > Tampermonkey is a highly trusted browser extension with over 10 million users on the official Chrome and Firefox web stores. It acts as a safe manager that lets you run custom, open-source code on specific websites. It is completely safe—you can read every line of SoraVault's code before installing it, and the script is strictly sandboxed to only run on `sora.chatgpt.com`.
 > In your extension tab: Be sure to enable "developer mode", go to details of Tampermonkey and enable "allow user scripts"
-2. Open the [SoraVault v2.0 Script](tampermonkey/SoraVault_v2_0.user.js) file here on GitHub.
+2. Open the [SoraVault v2.5 Script](dist/SoraVault.user.js) file here on GitHub.
 3. Click the **"Raw"** button (top right of the code window). Tampermonkey will auto-detect the script and prompt you to install it. *(Alternatively, download the file and drag & drop it into your browser).* 4. Go to [sora.chatgpt.com](https://sora.chatgpt.com).
 5. Use the SoraVault panel on the page: **Scan** → **Filter** (optional) → **Download**.
 
 
-### Option B: Chrome / Edge Extension (for installation in dev mode)
+### Option B: Chrome / Edge Extension (for installation in dev mode, more convenient)
 
-[SoraVault 2 - Chrome Extension - Pre-Release](SoraVault%202%20-%20Chrome%20Extension%20-%20Pre-Release%20(Feature%20Identical%20to%20Tampermonkey).zip)
+[SoraVault 2 - Chrome Extension](dist/chrome-extension)
 
-1. Unzip the file into any folder of choice. 
+1. Download the whole folder and unzip it to any folder
 2. In Chrome/Edge, go to your extension tab, activate developer mode (it's a small toggle switch, usually located in the top right corner).
 3. Click the "Load unpacked" button that has now appeared at the top left of the page.
 4. Browse to and select the folder where you unzipped the extension files in Step 1.
@@ -77,15 +80,18 @@ SoraVault is a free, API-driven tool to bulk export your OpenAI Sora library. Ea
 - **Sora v2 Videos** — Profile videos AND Draft videos, full resolution.
 - **Sora v1 Images** — Your complete image library from classic Sora.
 - **Liked Content** — Backup your favorite videos and images from other creators (v1 and v2).
+- **Cameos & Cameo Drafts** — Videos where you appear as a cameo (public) and private cameo draft posts. New in v2.5.
 - **Export Formats** — Toggle between saving media, prompt `.txt` sidecars, and raw `.json` payload metadata.
 
 ### Intelligent Data Capture
-- **API-Driven Architecture** — V2.0 operates entirely via API interception and background calls. No more clunky auto-scrolling or relying on page elements.
-- **Independent Pipelines** — Manage scanning sources independently (v1 library, v1 liked, v2 profile, v2 drafts, v2 liked).
+- **API-Driven Architecture** — Operates entirely via API interception and background calls. No more clunky auto-scrolling or relying on page elements.
+- **Independent Pipelines** — Manage scanning sources independently (v1 library, v1 liked, v2 profile, v2 drafts, v2 liked, v2 cameos, v2 cameo drafts).
 - **Skip Errors** — Automatically detects and skips items flagged as `sora_error` or `sora_content_violation`.
 - **Hardcoded Auth (Optional)** — Advanced users can hardcode their `BEARER_TOKEN` in the config to bypass manual interception.
 
 ### Granular Filter Engine
+- 🗂️ **Category filter** — filter by source (Profile, Liked, Cameos, Drafts…) before downloading. New in v2.5.
+- ⭐ **Favorites filter** — export only the items you've starred within your own v1 library, without pulling your entire collection. New in v2.5.
 - 🔎 Live full-text search across all prompts
 - 🚫 **Author Exclusion** — Easily filter out specific creators when backing up your "Liked" feed. For example, yourself.
 - 📐 Aspect ratio chips (16:9, 9:16, 1:1, etc.)
@@ -96,12 +102,14 @@ SoraVault is a free, API-driven tool to bulk export your OpenAI Sora library. Ea
 
 ### Archive-Grade Downloads
 - **Original source files** from OpenAI servers (not preview thumbnails)
-- **Granular Auto-Sorting** — Content is automatically sorted into 6 smart subfolders: `sora_v1_images`, `sora_v1_videos`, `sora_v1_liked`, `sora_v2_profile`, `sora_v2_drafts`, and `sora_v2_liked`.
+- **Watermark-free downloads** — Profile and Liked videos are downloaded via the soravdl.com proxy, removing the Sora watermark automatically. Adds ~5–6s per video. Auto-disables on persistent failure, falls back to direct download. New in v2.5.
+- **Granular Auto-Sorting** — Content is automatically sorted into smart subfolders: `sora_v1_images`, `sora_v1_videos`, `sora_v1_liked`, `sora_v2_profile`, `sora_v2_drafts`, `sora_v2_liked`, `sora_v2_cameos`, `sora_v2_cameo_drafts`.
 - **Smart naming** — `{date}_{prompt}_{genId}` with auto-truncation
 - **Custom output folder** via File System Access API (one permission, zero popups)
 
 ### Performance
-- Up to 5 parallel downloads (configurable)
+- Up to 8 parallel downloads (Standard / Faster / Very fast presets)
+- Live activity status line — see what each worker is doing in real time. New in v2.5.
 - Built-in rate-limit protection
 - Visual progress bar + detailed log
 - Safe abort at any time
@@ -140,13 +148,13 @@ A: Yes and yes. You are only downloading your own generated content and data you
 A: No. SoraVault relies on reading data directly from Sora's live servers. Once the servers are taken offline, this tool will stop working. **You must run your backup before the official shutdown date.**
 
 **Q: I have 500+ files. How long does it take?**
-A: Because v2.0 is fully API-driven, it takes only under 2 minutes to scan your library. With default settings (5 parallel downloads), expect ~10 minutes for the download phase. Depends on connection speed.
+A: Because v2.0 is fully API-driven, it takes only under 2 minutes to scan your library. With default settings (2 parallel downloads), expect ~10 minutes for the download phase. With watermark removal enabled, add ~5–6s per eligible video. Depends on connection speed.
 
 **Q: Why Tampermonkey and not a browser extension?**
 A: Tampermonkey is actually easier to install and use than sideloading a CRX extension (which requires Developer Mode and shows browser warnings). One click to install, auto-updates, zero nag screens.
 
-**Q: What about the standalone app?**
-A: A native desktop app (Mac, Windows, Linux) is potentially releasing next week. No browser or extensions needed. Same features, even simpler UX.
+**Q: Why does watermark removal add time to my download?**
+A: Watermark-free downloads are fetched through an external proxy (soravdl.com), which takes 5–6 seconds per video. For large libraries, the total time badge in the UI shows the estimated extra time before you start. You can disable watermark removal in the export settings if speed matters more.
 
 **Q: Is this a Sora scraper or Sora downloader?**
 A: SoraVault acts as a complete Sora video downloader and library backup tool, capturing everything via API rather than traditional screen scraping.
@@ -188,3 +196,8 @@ This software is provided as-is, without warranty of any kind.
 
 *Built with urgency and care by Sebastian —
  [X](https://x.com/charjou) 
+
+---
+
+*Credits*
+- Watermark removal logic inspired by Casey Jardin (MIT License).

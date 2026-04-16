@@ -1,0 +1,21 @@
+// ==UserScript==
+// @name         SoraVault 2.5
+// @namespace    https://github.com/charyou/SoraVault
+// @version      2.5.0
+// @description  Bulk backup Sora content — images, videos, drafts, liked. API-driven, page-independent.
+// @author       Sebastian Haas (charyou)
+// @homepageURL  https://github.com/charyou/SoraVault
+// @supportURL   https://github.com/charyou/SoraVault/issues
+// @license      © 2026 Sebastian Haas – Personal use only; no redistribution or resale. See https://github.com/charyou/SoraVault/blob/main/LICENSE
+// @match        https://sora.chatgpt.com/*
+// @match        https://sora.com/*
+// @match        https://www.sora.com/*
+// @grant        GM_download
+// @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
+// @connect      videos.openai.com
+// @connect      sora.chatgpt.com
+// @connect      api.github.com
+// @connect      *
+// @run-at       document-start
+// ==/UserScript==
