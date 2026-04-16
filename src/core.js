@@ -63,9 +63,9 @@
     };
 
     const SHARED_VIDEO_ID_PATTERN            = /^s_[A-Za-z0-9_-]+$/;
-    const WATERMARK_FETCH_MAX_ATTEMPTS       = 6;
+    const WATERMARK_FETCH_MAX_ATTEMPTS       = 3;
     const WATERMARK_FETCH_BASE_RETRY_MS      = 1200;
-    const WATERMARK_FETCH_MAX_RETRY_MS       = 20000;
+    const WATERMARK_FETCH_MAX_RETRY_MS       = 10000;
     const WATERMARK_PROXY_FAILURE_LIMIT      = 3;
     const MIN_VIDEO_BYTES_FALLBACK_THRESHOLD = 256 * 1024;
     const ESTIMATED_SIZE_FALLBACK_RATIO      = 0.2;
@@ -1592,7 +1592,7 @@
         if (!badge) return;
 
         const saveMedia = readConfigBool('SAVE_MEDIA', true);
-        const watermarkEnabled = readConfigBool('WATERMARK_REMOVAL', true);
+        const watermarkEnabled = readConfigBool('WATERMARK_REMOVAL', false);
         if (!saveMedia || !watermarkEnabled) {
             badge.textContent = 'off';
             badge.classList.add('off');
@@ -1621,7 +1621,7 @@
         const saveMedia = readConfigBool('SAVE_MEDIA', true);
         const saveTxt   = readConfigBool('DOWNLOAD_TXT', CFG.DOWNLOAD_TXT);
         const saveJSON  = readConfigBool('SAVE_JSON', false);
-        watermarkRemovalEnabled = readConfigBool('WATERMARK_REMOVAL', true);
+        watermarkRemovalEnabled = readConfigBool('WATERMARK_REMOVAL', false);
 
         if (!saveMedia && !saveTxt && !saveJSON) {
             showToast('Enable at least one output format ↑');
@@ -2749,7 +2749,7 @@
         <span class="sdl-export-lbl">Watermark Removal<span>Slow. No support for drafts.</span></span>
         <span class="sdl-export-badge" id="sdl-watermark-estimate">+0 min</span>
         <label class="sdl-toggle">
-          <input type="checkbox" id="sdl-cfg-WATERMARK_REMOVAL" checked>
+          <input type="checkbox" id="sdl-cfg-WATERMARK_REMOVAL">
           <div class="sdl-toggle-track"></div>
           <div class="sdl-toggle-thumb"></div>
         </label>
