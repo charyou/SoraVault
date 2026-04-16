@@ -9,38 +9,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [2.5.3] — 2026-04-17
 
-### Fixed
-
-- **Skip-existing now catches all prefixed IDs** — re-running a download against a
-  folder of already-saved files would occasionally re-download a handful of items
-  whose filenames had been auto-truncated. The ID matcher now captures the
-  `gen_` / `task_` / `s_` prefix as part of the token, so truncated and untruncated
-  filenames both match reliably. Reproduced against a 158-item re-download: all
-  matching items are now correctly skipped.
-
----
-
-## [2.5.2] — 2026-04-17
-
 ### Added
 
-- **Skip existing files** — new toggle (on by default) in the export settings.
-  Before downloading, SoraVault enumerates each target subfolder and skips items
-  already present on disk. Videos must be ≥ 3 MB and images ≥ 1 MB to count as
-  valid (so partial/broken files get re-downloaded). Skips are tracked separately
-  and shown on the done screen as `Skipped N existing files — X videos, Y prompts,
-  Z images · by source: …`. Works in File System Access mode only.
-- **Pause button** — pause and resume an in-flight download without losing
-  progress. Workers finish their current item, then wait at the gate until you
-  resume. Stop still wins over pause. The progress bar dims to amber and the ETA
-  shows `Paused` while held.
+- **Skip existing files** — turn your download into a true resume. SoraVault now
+  checks each target folder before starting and skips anything already saved, so
+  you can safely re-run on the same folder to fill in only what's missing. Partial
+  or broken files (videos under 3 MB, images under 1 MB) are re-downloaded
+  automatically. The done screen shows a clear summary: *"Skipped 3,247 existing
+  files — 1,892 videos, 1,340 prompts · by source: Liked 1,203 · Drafts 1,224."*
+  Toggle it off in export settings if you want to force-redownload everything.
+  *(File System Access mode only — i.e. when you've chosen a download folder.)*
+
+- **Pause button** — you can now pause an in-flight download and resume it later
+  without losing progress. Workers finish whatever item they're on and wait at
+  the gate until you press Resume. The progress bar dims to amber and the ETA
+  shows *Paused* so you always know the state. Stop still wins over Pause if you
+  want to abort entirely.
 
 ### Changed
 
-- **Filename template default** — changed from `{date}_{prompt}_{genId}` to
-  `{genId}_{date}_{prompt}` so the ID anchor is always present at the start of the
-  filename, even after long-path truncation. User-customized templates are left
-  untouched.
+- **Smarter default filenames** — new downloads are now saved as
+  `{genId}_{date}_{prompt}` instead of `{date}_{prompt}_{genId}`. This puts the
+  unique content ID at the start of the filename, which makes Skip-existing
+  reliable even when long prompts cause filenames to be truncated. Your
+  customized filename templates are left untouched.
 
 ---
 
