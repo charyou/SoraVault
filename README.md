@@ -23,7 +23,7 @@ SoraVault is a free, API-driven tool to bulk export your OpenAI Sora library. Ea
 | Liked Content (v1 & v2) | ✅ | ❌ | ❌ | ❌ |
 | Cameos & Cameo Drafts (Sora v2) | ✅ **NEW** | ❌ | ❌ | ❌ |
 | Original quality (full-res renders) | ✅ | ✅ | ✅ | ❌ (compressed) |
-| **Watermark-free downloads** | ✅ **NEW** | ❌ | ❌ | ❌ |
+| **Watermark-free downloads** ¹ | ✅ **NEW** | ❌ | ❌ | ❌ |
 | Prompt saved as .txt sidecar | ✅ | ❌ | ❌ | ❌ |
 | Raw JSON metadata export | ✅ | ❌ | ❌ | ❌ |
 | Bulk download (entire library) | ✅ | ✅ (one ZIP, no filters) | ❌ | Partial |
@@ -34,6 +34,8 @@ SoraVault is a free, API-driven tool to bulk export your OpenAI Sora library. Ea
 | Parallel downloads (up to 8x speed) | ✅ | ❌ | ❌ | ❌ |
 | Granular auto-folder sorting | ✅ | ❌ | ❌ | ❌ |
 | Only Export your Favorites (v1) | ✅ **NEW** | ❌ | ❌ | ❌ |
+
+¹ Via soravdl.com (third-party proxy — availability not guaranteed). Disabled by default; enable in export settings.
 
 ---
 
@@ -103,7 +105,7 @@ SoraVault is a free, API-driven tool to bulk export your OpenAI Sora library. Ea
 
 ### Archive-Grade Downloads
 - **Original source files** from OpenAI servers (not preview thumbnails)
-- **Watermark-free downloads** — Profile and Liked videos are downloaded via the soravdl.com proxy, removing the Sora watermark automatically. Adds ~5–6s per video. Auto-disables on persistent failure, falls back to direct download. New in v2.5.
+- **Watermark-free downloads** — Profile and Liked videos can be fetched via the soravdl.com third-party proxy, removing the Sora watermark automatically. Adds ~5–6s per video. Disabled by default; enable in export settings. Auto-disables on persistent failure and falls back to direct download. Availability depends on soravdl.com uptime. New in v2.5.
 - **Granular Auto-Sorting** — Content is automatically sorted into smart subfolders: `sora_v1_images`, `sora_v1_videos`, `sora_v1_liked`, `sora_v2_profile`, `sora_v2_drafts`, `sora_v2_liked`, `sora_v2_cameos`, `sora_v2_cameo_drafts`.
 - **Smart naming** — `{date}_{prompt}_{genId}` with auto-truncation
 - **Custom output folder** via File System Access API (one permission, zero popups)
@@ -155,7 +157,7 @@ A: Because v2.0 is fully API-driven, it takes only under 2 minutes to scan your 
 A: Tampermonkey is actually easier to install and use than sideloading a CRX extension (which requires Developer Mode and shows browser warnings). One click to install, auto-updates, zero nag screens.
 
 **Q: Why does watermark removal add time to my download?**
-A: Watermark-free downloads are fetched through an external proxy (soravdl.com), which takes 5–6 seconds per video. For large libraries, the total time badge in the UI shows the estimated extra time before you start. You can disable watermark removal in the export settings if speed matters more.
+A: Watermark-free downloads are fetched through soravdl.com, a third-party proxy not affiliated with SoraVault. It takes 5–6 seconds per video and its availability is not guaranteed. For large libraries, the time estimate badge in the UI shows the extra time before you start. The feature is disabled by default — enable it in export settings, and SoraVault will automatically fall back to direct download if the proxy is unavailable.
 
 **Q: Is this a Sora scraper or Sora downloader?**
 A: SoraVault acts as a complete Sora video downloader and library backup tool, capturing everything via API rather than traditional screen scraping.
