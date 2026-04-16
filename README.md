@@ -49,17 +49,7 @@ SoraVault is a free, API-driven tool to bulk export your OpenAI Sora library. Ea
 
 ## 🚀 Quick Start
 
-### Option A: Tampermonkey Script 
-
-1. Install [Tampermonkey](https://tampermonkey.net) for your browser. 
-> **What is Tampermonkey and is it safe?** > Tampermonkey is a highly trusted browser extension with over 10 million users on the official Chrome and Firefox web stores. It acts as a safe manager that lets you run custom, open-source code on specific websites. It is completely safe—you can read every line of SoraVault's code before installing it, and the script is strictly sandboxed to only run on `sora.chatgpt.com`.
-> In your extension tab: Be sure to enable "developer mode", go to details of Tampermonkey and enable "allow user scripts"
-2. Open the [SoraVault v2.5 Script](dist/SoraVault.user.js) file here on GitHub.
-3. Click the **"Raw"** button (top right of the code window). Tampermonkey will auto-detect the script and prompt you to install it. *(Alternatively, download the file and drag & drop it into your browser).* 4. Go to [sora.chatgpt.com](https://sora.chatgpt.com).
-5. Use the SoraVault panel on the page: **Scan** → **Filter** (optional) → **Download**.
-
-
-### Option B: Chrome / Edge Extension (for installation in dev mode, more convenient)
+### Option A: Chrome / Edge Extension (for installation in dev mode, more convenient - RECOMMENDED)
 
 [SoraVault 2 - Chrome Extension](dist/chrome-extension)
 
@@ -71,6 +61,17 @@ SoraVault is a free, API-driven tool to bulk export your OpenAI Sora library. Ea
 6. For any future updates, just export the new zip to the same folder, go back to your extension tab, scroll down to SoraVault and press "Reload script"
    
 <img src="assets/sora-app.png" height="565">
+
+
+### Option A: Tampermonkey Script 
+
+1. Install [Tampermonkey](https://tampermonkey.net) for your browser. 
+> **What is Tampermonkey and is it safe?** > Tampermonkey is a highly trusted browser extension with over 10 million users on the official Chrome and Firefox web stores. It acts as a safe manager that lets you run custom, open-source code on specific websites. It is completely safe—you can read every line of SoraVault's code before installing it, and the script is strictly sandboxed to only run on `sora.chatgpt.com`.
+> In your extension tab: Be sure to enable "developer mode", go to details of Tampermonkey and enable "allow user scripts"
+2. Open the [SoraVault v2.5 Script](dist/SoraVault.user.js) file here on GitHub.
+3. Click the **"Raw"** button (top right of the code window). Tampermonkey will auto-detect the script and prompt you to install it. *(Alternatively, download the file and drag & drop it into your browser).* 4. Go to [sora.chatgpt.com](https://sora.chatgpt.com).
+5. Use the SoraVault panel on the page: **Scan** → **Filter** (optional) → **Download**.
+
 
 ---
 

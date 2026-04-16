@@ -1,3 +1,33 @@
+/*! 
+  SoraVault Core Logic
+  (c) 2026 Sebastian Haas (charyou)
+
+  THIRD-PARTY NOTICE:
+  The watermark removal and proxy logic is based on code by Casey Jardin.
+  
+  MIT License
+  Copyright (c) 2026 Casey Jardin
+  
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+*/
+
+
 (function () {
     'use strict';
 
@@ -19,7 +49,7 @@
     // =====================================================================
     // CONFIG & RELEASE INFO
     // =====================================================================
-    const VERSION      = '2.5.0';
+    const VERSION      = '2.5.1';
     const RELEASE_DATE = '2026-04-16';
     const GITHUB_REPO  = 'charyou/SoraVault';
     const SORA_SHUTDOWN = new Date('2026-04-26T00:00:00Z');
@@ -33,9 +63,9 @@
     };
 
     const SHARED_VIDEO_ID_PATTERN            = /^s_[A-Za-z0-9_-]+$/;
-    const WATERMARK_FETCH_MAX_ATTEMPTS       = 6;
+    const WATERMARK_FETCH_MAX_ATTEMPTS       = 3;
     const WATERMARK_FETCH_BASE_RETRY_MS      = 1200;
-    const WATERMARK_FETCH_MAX_RETRY_MS       = 20000;
+    const WATERMARK_FETCH_MAX_RETRY_MS       = 10000;
     const WATERMARK_PROXY_FAILURE_LIMIT      = 3;
     const MIN_VIDEO_BYTES_FALLBACK_THRESHOLD = 256 * 1024;
     const ESTIMATED_SIZE_FALLBACK_RATIO      = 0.2;
@@ -1562,7 +1592,7 @@
         if (!badge) return;
 
         const saveMedia = readConfigBool('SAVE_MEDIA', true);
-        const watermarkEnabled = readConfigBool('WATERMARK_REMOVAL', true);
+        const watermarkEnabled = readConfigBool('WATERMARK_REMOVAL', false);
         if (!saveMedia || !watermarkEnabled) {
             badge.textContent = 'off';
             badge.classList.add('off');
@@ -1591,7 +1621,7 @@
         const saveMedia = readConfigBool('SAVE_MEDIA', true);
         const saveTxt   = readConfigBool('DOWNLOAD_TXT', CFG.DOWNLOAD_TXT);
         const saveJSON  = readConfigBool('SAVE_JSON', false);
-        watermarkRemovalEnabled = readConfigBool('WATERMARK_REMOVAL', true);
+        watermarkRemovalEnabled = readConfigBool('WATERMARK_REMOVAL', false);
 
         if (!saveMedia && !saveTxt && !saveJSON) {
             showToast('Enable at least one output format ↑');
@@ -2716,10 +2746,10 @@
         </label>
       </div>
       <div class="sdl-export-row">
-        <span class="sdl-export-lbl">Watermark Removal<span>Slow. No support for drafts.</span></span>
+        <span class="sdl-export-lbl">Watermark Removal<span>Via soravdl.com (3rd party). No support for drafts.</span></span>
         <span class="sdl-export-badge" id="sdl-watermark-estimate">+0 min</span>
         <label class="sdl-toggle">
-          <input type="checkbox" id="sdl-cfg-WATERMARK_REMOVAL" checked>
+          <input type="checkbox" id="sdl-cfg-WATERMARK_REMOVAL">
           <div class="sdl-toggle-track"></div>
           <div class="sdl-toggle-thumb"></div>
         </label>
