@@ -197,5 +197,5 @@ This software is provided as-is, without warranty of any kind.
 
 ---
 
-*Built with urgency and care by Sebastian —
+*Built with urgency and care by Sebastian* —
  [X](https://x.com/charjou) — [LinkedIn](https://www.linkedin.com/in/-sebastian-haas/)
