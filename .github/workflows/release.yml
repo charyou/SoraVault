@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: python build.py
+
+      - name: Get version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Zip Chrome Extension
+        run: |
+          cd dist
+          zip -r ../SoraVault-chrome-v${{ steps.version.outputs.version }}.zip chrome-extension/
+
+      - name: Extract changelog section
+        run: |
+          python3 - <<'EOF'
+          import re
+
+          with open('CHANGELOG.md', encoding='utf-8') as f:
+              content = f.read()
+
+          version = '${{ steps.version.outputs.version }}'
+          # Grab everything from ## [version] down to (but not including) the next ## [
+          pattern = rf'(## \[{re.escape(version)}\].*?)(?=\n## \[|\Z)'
+          m = re.search(pattern, content, re.DOTALL)
+
+          notes = m.group(1).strip() if m else f'Release {version}'
+
+          with open('release_notes.md', 'w', encoding='utf-8') as f:
+              f.write(notes)
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ steps.version.outputs.version }}
+          body_path: release_notes.md
+          files: |
+            SoraVault-chrome-v${{ steps.version.outputs.version }}.zip
+            dist/SoraVault.user.js
