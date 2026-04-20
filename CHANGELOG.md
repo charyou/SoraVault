@@ -7,6 +7,40 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ---
 
+## [2.6.0] — 2026-04-20
+
+### Added
+
+- **Mirror mode (beta)** — a brand-new way to build your library: just browse
+  Sora normally, and SoraVault quietly captures everything you scroll past and
+  downloads it in the background with 4 workers. No scanning, no waiting — open
+  Explore, a creator's profile, or your own drafts, and the files land on disk
+  as you go. Files are organised by where you found them:
+  `mirror_browse/sora2_explore/`, `mirror_browse/sora2_profile/charju/`,
+  `mirror_browse/sora1_library/`, etc. Single-post pages route into the
+  author's folder when known.
+- **Mirror filters** — set a minimum like count, an include-keywords list, or
+  an exclude-keywords list to capture only the content you actually want.
+  Optional `.txt` prompt sidecar is enabled by default and can be toggled off.
+- **Append-only manifest** (`mirror_manifest.json`) — Mirror mode keeps a log
+  of everything it has already saved, so turning it on again never re-downloads
+  what's already on disk.
+- **Minimised-panel status** — when you collapse the SoraVault panel and
+  Mirror mode is running, a small pulsing 📡 stays visible in the header so
+  you never have to wonder whether captures are still happening.
+- **UI refactor** — the main panel is now split into clearly-labelled
+  **Backup** and **Mirror (beta)** sections so the two features don't
+  compete for attention.
+
+### Known limitations
+
+- Mirror mode stops if the Sora tab fully reloads (state lives in the page).
+  A reload-resume flow is planned for a follow-up release.
+- Watermark removal is intentionally skipped in Mirror mode. Use the regular
+  Backup flow with watermark removal enabled if you need clean MP4s.
+
+---
+
 ## [2.5.3] — 2026-04-17
 
 ### Added

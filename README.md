@@ -1,4 +1,4 @@
-# <sub><img src="assets/soravault-logo-square.png" height="35"></sub> SoraVault 2.5 – Bulk Export & Backup Tool for OpenAI Sora
+# <sub><img src="assets/soravault-logo-square.png" height="35"></sub> SoraVault 2.6 – Bulk Export & Backup Tool for OpenAI Sora
 
 **Your Sora library is about to disappear. Vault it.**
  
@@ -12,28 +12,43 @@ SoraVault is a free, API-driven tool to bulk export your OpenAI Sora library. Ea
 
 ---
 
+## 🆕 New in 2.6 — Mirror mode (beta)
+
+<img src="assets/feature_mirrormode.png" alt="SoraVault Mirror mode — passive capture while you browse Sora" width="720">
+
+**Just browse Sora normally — SoraVault captures everything you scroll past.**
+Mirror mode runs quietly in the background: open Explore, a creator's profile,
+your own drafts, or any post, and files land on disk in folders that mirror
+where you found them (`mirror_browse/sora2_explore/`, `mirror_browse/sora2_profile/charju/`, …).
+No scans, no waiting, no re-downloads. Turn it on, start scrolling, walk away.
+
+[Jump to Mirror mode details →](#-mirror-mode-beta--new-in-26)
+
+---
+
 ## ⚡ What makes SoraVault different
 
-| Feature | SoraVault 2.5 | OpenAI Official Export | Manual Download | Other Tools |
+| Feature | SoraVault 2.6 | OpenAI Official Export | Manual Download | Other Tools |
 |---------|-----------|------------------------|-----------------|-------------|
 | FREE | ✅ | ✅ | ✅ | ❌ (only limited) |
 | Videos (Sora v2 — Profile) | ✅ | ✅ (mixed with all ChatGPT data) | ❌ (one by one) | ❌ |
 | Videos (Sora v2 — Draft) | ✅ | ❌ | ❌ (one by one) | ❌ |
 | Images (Sora v1) | ✅ | ✅ (mixed with all ChatGPT data) | ❌ (one by one) | Partial |
 | Liked Content (v1 & v2) | ✅ | ❌ | ❌ | ❌ |
-| Cameos & Cameo Drafts (Sora v2) | ✅ **NEW** | ❌ | ❌ | ❌ |
+| Cameos & Cameo Drafts (Sora v2) | ✅ | ❌ | ❌ | ❌ |
+| **Mirror mode — passive capture while browsing** | ✅ **NEW** | ❌ | ❌ | ❌ |
 | Original quality (full-res renders) | ✅ | ✅ | ✅ | ❌ (compressed) |
-| **Watermark-free downloads** ¹ | ✅ **NEW** | ❌ | ❌ | ❌ |
+| **Watermark-free downloads** ¹ | ✅ | ❌ | ❌ | ❌ |
 | Prompt saved as .txt sidecar | ✅ | ❌ | ❌ | ❌ |
 | Raw JSON metadata export | ✅ | ❌ | ❌ | ❌ |
 | Bulk download (entire library) | ✅ | ✅ (one ZIP, no filters) | ❌ | Partial |
-| Smart filters (source, author, ratio, quality, date, favorites **NEW** ) | ✅ | ❌ | ❌ | ❌ |
+| Smart filters (source, author, ratio, quality, date, favorites) | ✅ | ❌ | ❌ | ❌ |
 | Instant — no waiting period | ✅ | ❌ (days of waiting) | ✅ | ❌ |
 | No link expiry | ✅ | ❌ (link expires in 24h) | ✅ | — |
 | API-Driven (No page scrolling required) | ✅ | — | — | ❌ |
 | Parallel downloads (up to 8x speed) | ✅ | ❌ | ❌ | ❌ |
 | Granular auto-folder sorting | ✅ | ❌ | ❌ | ❌ |
-| Only Export your Favorites (v1) | ✅ **NEW** | ❌ | ❌ | ❌ |
+| Only Export your Favorites (v1) | ✅ | ❌ | ❌ | ❌ |
 
 ¹ Via soravdl.com (third-party proxy — availability not guaranteed). Disabled by default; enable in export settings.
 
@@ -78,6 +93,47 @@ SoraVault is a free, API-driven tool to bulk export your OpenAI Sora library. Ea
 ---
 
 ## 🔍 Features in Detail
+
+### 📡 Mirror mode (beta) — new in 2.6
+
+<img src="assets/feature_mirrormode.png" alt="SoraVault Mirror mode panel — toggle, folder picker, like/keyword filters" width="560">
+
+A brand-new way to build your library: instead of running a scan and waiting,
+just **browse Sora normally** and SoraVault quietly captures everything you
+scroll past and downloads it in the background with 4 parallel workers.
+
+**What it does**
+- Watches every Sora API response as you browse — no extra requests, no scanning.
+- Saves files as you go, organised by where you found them: `mirror_browse/sora2_explore/`,
+  `mirror_browse/sora2_profile/{creator}/`, `mirror_browse/sora1_library/`, and so on.
+- Single-post pages (`/p/{id}`) land in the author's folder when SoraVault knows the author.
+- Keeps an append-only `mirror_manifest.json` so re-enabling later never re-downloads
+  anything already on disk.
+- Optional `.txt` prompt sidecar next to each media file (on by default).
+
+**Filters** — capture only what you want:
+- **Min likes** — e.g. only save posts with 1,000+ likes.
+- **Include keywords** — comma-separated; matches anywhere in the prompt.
+- **Exclude keywords** — comma-separated; blocks matches.
+
+**How to use it**
+1. Open the SoraVault panel on Sora. You'll see two sections: **Backup** (the
+   classic scan + download flow) and **Mirror (beta)**.
+2. In the Mirror tile, click **📂 Pick folder…** and choose where captures
+   should land. SoraVault creates a `mirror_browse/` subfolder inside it.
+3. (Optional) Set a min-likes threshold and/or include/exclude keywords.
+4. Flip the Mirror toggle on. The badge shows live status
+   (`📡 N captured · M queued` / `📡 N saved`).
+5. Browse Sora as you normally would — Explore, creator profiles, your own
+   drafts, liked feed, single posts. Files download in the background.
+6. Minimise the panel if you like — a small pulsing **📡** stays in the header
+   so you know capture is still running.
+
+**Known limitations**
+- If the Sora tab fully reloads, Mirror stops (state lives in the page).
+  A reload-resume flow is planned for the next release.
+- Watermark removal is intentionally skipped in Mirror mode. If you need
+  watermark-free MP4s, use the regular Backup flow with watermark removal on.
 
 ### Full Library Support
 - **Sora v2 Videos** — Profile videos AND Draft videos, full resolution.
