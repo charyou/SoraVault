@@ -49,8 +49,8 @@
     // =====================================================================
     // CONFIG & RELEASE INFO
     // =====================================================================
-    const VERSION      = '2.5.3';
-    const RELEASE_DATE = '2026-04-17';
+    const VERSION      = '2.6.0';
+    const RELEASE_DATE = '2026-04-20';
     const GITHUB_REPO  = 'charyou/SoraVault';
     const SORA_SHUTDOWN = new Date('2026-04-26T00:00:00Z');
 
@@ -82,6 +82,16 @@
     const WATERMARK_PROXY_FAILURE_LIMIT      = 3;
     const MIN_VIDEO_BYTES_FALLBACK_THRESHOLD = 256 * 1024;
     const ESTIMATED_SIZE_FALLBACK_RATIO      = 0.2;
+
+    // =====================================================================
+    // BROWSE & FETCH (v2.6.0) — passive capture while browsing Sora
+    // =====================================================================
+    const BROWSE_FETCH_ROOT_NAME           = 'mirror_browse';
+    const BROWSE_FETCH_WORKERS             = 4;
+    const BROWSE_FETCH_QUEUE_MAX           = 500;
+    const BROWSE_FETCH_IDLE_SLEEP_MS       = 1500;
+    const BROWSE_FETCH_MANIFEST_DEBOUNCE_MS = 8000;
+    const BROWSE_FETCH_MANIFEST_FILE       = 'mirror_manifest.json';
 
     // =====================================================================
     // SCAN SOURCES  — single source of truth for all source-aware logic
@@ -185,6 +195,23 @@
     let isV2Supported      = true;
     let geoCheckInitDone   = false;
 
+    // Browse & Fetch state
+    let browseFetchEnabled        = false;
+    let browseFetchBaseDir        = null;  // user-picked base dir
+    let browseFetchRootDir        = null;  // cached mirror_browse subfolder handle
+    const browseFetchDirCache     = new Map(); // "sora2_profile/charju/drafts" → DirHandle
+    const browseFetchQueue        = [];
+    const browseFetchSeen         = new Set();  // genId/postId
+    let   browseFetchWorkersActive = 0;
+    let   browseFetchStopRequested = false;
+    const browseFetchStats        = { captured: 0, skipped: 0, failed: 0, dropped: 0 };
+    const browseFetchFilters      = { minLikes: 0, include: [], exclude: [], saveTxt: true };
+    const browseFetchManifest     = new Map();  // key → entry
+    let   browseFetchManifestDirty = false;
+    let   browseFetchManifestTimer = null;
+    let   browseFetchManifestLoaded = false;
+    const browseFetchDiscoveredEndpoints = new Set();
+
     // Source enable/disable state — all enabled by default
     const enabledSources = new Set(SCAN_SOURCES.map(s => s.id));
 
@@ -243,17 +270,34 @@
         }
 
         const response = await _fetch(...args);
+        // Snapshot the page URL at intercept time — used to bucket browse-fetch captures by where the user was
+        const capturedPath = (typeof location !== 'undefined') ? (location.pathname || '/') : '/';
         if (response.ok) {
-            if (url.includes('/list_tasks'))
-                response.clone().json().then(d => ingestV1Page(d, 'v1_library')).catch(() => {});
-            else if (url.includes('/backend/project_y/profile_feed/') && url.includes('cut=appearances'))
-                response.clone().json().then(d => ingestV2Page(d, url, 'v2_cameos')).catch(() => {});
-            else if (url.includes('/backend/project_y/profile_feed/'))
-                response.clone().json().then(d => ingestV2Page(d, url, 'v2_profile')).catch(() => {});
-            else if (url.includes('/backend/project_y/profile/drafts/cameos'))
-                response.clone().json().then(d => ingestV2Page(d, url, 'v2_cameo_drafts')).catch(() => {});
-            else if (url.includes('/backend/project_y/profile/drafts/v2'))
-                response.clone().json().then(d => ingestV2Page(d, url, 'v2_drafts')).catch(() => {});
+            let handled = false;
+            if (url.includes('/list_tasks')) {
+                handled = true;
+                response.clone().json().then(d => ingestV1Page(d, 'v1_library', capturedPath)).catch(() => {});
+            }
+            else if (url.includes('/backend/project_y/profile_feed/') && url.includes('cut=appearances')) {
+                handled = true;
+                response.clone().json().then(d => ingestV2Page(d, url, 'v2_cameos', capturedPath)).catch(() => {});
+            }
+            else if (url.includes('/backend/project_y/profile_feed/')) {
+                handled = true;
+                response.clone().json().then(d => ingestV2Page(d, url, 'v2_profile', capturedPath)).catch(() => {});
+            }
+            else if (url.includes('/backend/project_y/profile/drafts/cameos')) {
+                handled = true;
+                response.clone().json().then(d => ingestV2Page(d, url, 'v2_cameo_drafts', capturedPath)).catch(() => {});
+            }
+            else if (url.includes('/backend/project_y/profile/drafts/v2')) {
+                handled = true;
+                response.clone().json().then(d => ingestV2Page(d, url, 'v2_drafts', capturedPath)).catch(() => {});
+            }
+            // Opportunistic ingest — scan unknown Sora endpoints for capturable media when Browse & Fetch is on.
+            if (!handled && browseFetchEnabled && /\/backend\//.test(url)) {
+                response.clone().json().then(d => opportunisticIngest(d, url, capturedPath)).catch(() => {});
+            }
         }
         return response;
     };
@@ -274,12 +318,18 @@
     };
     ENV.win.XMLHttpRequest.prototype.open = function (m, u, ...r) {
         this._sv_url = u || '';
+        this._sv_path = (typeof location !== 'undefined') ? (location.pathname || '/') : '/';
         return _xhrOpen.apply(this, [m, u, ...r]);
     };
     ENV.win.XMLHttpRequest.prototype.send = function (...a) {
+        const captured = this._sv_path || '/';
         if ((this._sv_url || '').includes('/list_tasks'))
             this.addEventListener('load', function () {
-                if (this.status === 200) try { ingestV1Page(JSON.parse(this.responseText), 'v1_library'); } catch(e) {}
+                if (this.status === 200) try { ingestV1Page(JSON.parse(this.responseText), 'v1_library', captured); } catch(e) {}
+            });
+        else if (browseFetchEnabled && /\/backend\//.test(this._sv_url || ''))
+            this.addEventListener('load', function () {
+                if (this.status === 200) try { opportunisticIngest(JSON.parse(this.responseText), this._sv_url || '', captured); } catch(e) {}
             });
         return _xhrSend.apply(this, a);
     };
@@ -287,7 +337,7 @@
     // =====================================================================
     // DATA INGESTION — V1 (Images + Videos)
     // =====================================================================
-    function ingestV1Page(data, sourceId = 'v1_library') {
+    function ingestV1Page(data, sourceId = 'v1_library', capturedPath = null) {
         const tasks = data?.task_responses ?? data?.tasks ?? [];
         if (!Array.isArray(tasks)) return { hasMore: false, lastId: null };
         let added = 0;
@@ -308,7 +358,7 @@
                 if (gw && gh) { const g = gcd(gw, gh); ratio = `${gw/g}:${gh/g}`; }
                 const taskType = (gen.task_type ?? task.type ?? '').toLowerCase();
                 const isVideo  = taskType.includes('vid') || (gen.n_frames ?? 1) > 1;
-                collected.set(genId, {
+                const entry = {
                     mode: 'v1', source: sourceId, genId, taskId, date, prompt,
                     pngUrl: previewUrl,
                     width: gw, height: gh, ratio,
@@ -321,7 +371,9 @@
                     isVideo,
                     isFavorite: gen.is_favorite === true,
                     _raw: { task_id: taskId, task_prompt: prompt, ...gen },
-                });
+                };
+                collected.set(genId, entry);
+                maybeEnqueueBrowseFetch(entry, capturedPath);
                 added++;
             });
         });
@@ -332,7 +384,7 @@
     // =====================================================================
     // DATA INGESTION — V1 Liked
     // =====================================================================
-    function ingestV1LikedPage(data) {
+    function ingestV1LikedPage(data, capturedPath = null) {
         const items = data?.data;
         if (!Array.isArray(items)) return { hasMore: false, lastId: null };
 
@@ -354,7 +406,7 @@
             const isVideo  = taskType.includes('vid') || (gen.n_frames ?? 1) > 1;
             const author   = gen.user?.username ?? null;
 
-            collected.set(genId, {
+            const entry = {
                 mode: 'v1', source: 'v1_liked', genId,
                 taskId:    gen.task_id    ?? '',
                 date:      (gen.created_at ?? '').slice(0, 10),
@@ -372,7 +424,9 @@
                 likeCount: gen.like_count    ?? null,
                 canDownload: gen.can_download ?? null,
                 _raw: gen,
-            });
+            };
+            collected.set(genId, entry);
+            maybeEnqueueBrowseFetch(entry, capturedPath);
             added++;
         });
 
@@ -386,7 +440,7 @@
     // =====================================================================
     // DATA INGESTION — V2 (Videos / Profile + Drafts + Liked)
     // =====================================================================
-    function ingestV2Page(data, url, sourceId) {
+    function ingestV2Page(data, url, sourceId, capturedPath = null) {
         const isDrafts = sourceId === 'v2_drafts' || sourceId === 'v2_cameo_drafts' ||
                          (!sourceId && url && url.includes('/profile/drafts/'));
         const effectiveSource = sourceId ?? (isDrafts ? 'v2_drafts' : 'v2_profile');
@@ -429,7 +483,7 @@
                 const gw = item.width ?? null, gh = item.height ?? null;
                 let ratio = null;
                 if (gw && gh) { const g = gcd(gw, gh); ratio = `${gw/g}:${gh/g}`; }
-                collected.set(genId, {
+                const entryD = {
                     mode: 'v2', source: effectiveSource, genId,
                     taskId: item.task_id ?? '', postId: null,
                     date, prompt: item.prompt ?? item.title ?? '',
@@ -437,7 +491,9 @@
                     width: gw, height: gh, ratio,
                     duration: item.duration_s ?? null, model: null,
                     _raw: item,
-                });
+                };
+                collected.set(genId, entryD);
+                maybeEnqueueBrowseFetch(entryD, capturedPath);
                 added++;
             } else {
                 const post = item.post;
@@ -463,7 +519,7 @@
                 const gw = att.width ?? null, gh = att.height ?? null;
                 let ratio = null;
                 if (gw && gh) { const g = gcd(gw, gh); ratio = `${gw/g}:${gh/g}`; }
-                collected.set(postId, {
+                const entryP = {
                     mode: 'v2', source: effectiveSource,
                     genId:    att.id ?? att.generation_id ?? postId,
                     taskId:   att.task_id ?? null,
@@ -474,8 +530,12 @@
                     width: gw, height: gh, ratio,
                     duration: att.duration_s ?? null, model: null,
                     isLiked:  post.user_liked === true,
+                    likeCount: post.like_count ?? null,
+                    author:   item.profile?.username ?? null,
                     _raw: { post, profile: item.profile },
-                });
+                };
+                collected.set(postId, entryP);
+                maybeEnqueueBrowseFetch(entryP, capturedPath);
                 added++;
             }
         });
@@ -488,6 +548,318 @@
     function refreshScanCount() {
         const el = document.getElementById('sdl-scan-count');
         if (el) el.textContent = collected.size;
+    }
+
+    // =====================================================================
+    // BROWSE & FETCH (v2.6.0) — passive capture helpers
+    // =====================================================================
+    function browseFetchKey(item) {
+        return item.genId || item.postId || null;
+    }
+
+    function matchesBrowseFetchFilter(item) {
+        const f = browseFetchFilters;
+        if (f.minLikes > 0) {
+            const lc = Number.isFinite(item.likeCount) ? item.likeCount : 0;
+            if (lc < f.minLikes) return false;
+        }
+        const prompt = (item.prompt || '').toLowerCase();
+        if (f.exclude.length && f.exclude.some(t => prompt.includes(t))) return false;
+        if (f.include.length && !f.include.some(t => prompt.includes(t))) return false;
+        return true;
+    }
+
+    function sanitiseSegment(s) {
+        if (!s) return '';
+        return String(s)
+            .replace(/[\\/:*?"<>|]+/g, '_')
+            .replace(/\s+/g, '_')
+            .replace(/_+/g, '_')
+            .replace(/^[._]+|[._]+$/g, '')
+            .slice(0, 60);
+    }
+
+    // Build folder segments from the captured page path + item metadata.
+    // First segment gets prefixed with sora1_/sora2_; creator-scoped post pages route by author.
+    function browseFetchBuildSegments(item, pathname) {
+        const prefix = item.mode === 'v1' ? 'sora1_' : 'sora2_';
+        const raw = (pathname || '/').split('?')[0].split('#')[0];
+        const parts = raw.split('/').map(sanitiseSegment).filter(Boolean);
+
+        // Single-post page /p/{postId}: route to author's folder if known
+        if (parts.length >= 1 && parts[0] === 'p' && item.author) {
+            return [prefix + 'profile', sanitiseSegment(item.author), 'p'];
+        }
+        if (parts.length === 0) return [prefix + 'home'];
+        parts[0] = prefix + parts[0];
+        return parts;
+    }
+
+    async function browseFetchResolveDir(segments) {
+        if (!browseFetchRootDir) return null;
+        const cacheKey = segments.join('/');
+        if (browseFetchDirCache.has(cacheKey)) return browseFetchDirCache.get(cacheKey);
+        let dir = browseFetchRootDir;
+        for (const seg of segments) {
+            if (!seg) continue;
+            try { dir = await dir.getDirectoryHandle(seg, { create: true }); }
+            catch (e) { log(`⚠ Browse&Fetch: cannot create folder "${seg}": ${e.message}`); return null; }
+        }
+        browseFetchDirCache.set(cacheKey, dir);
+        return dir;
+    }
+
+    function maybeEnqueueBrowseFetch(item, pathname) {
+        if (!browseFetchEnabled) return;
+        const key = browseFetchKey(item);
+        if (!key) return;
+        if (browseFetchSeen.has(key)) return;
+        if (browseFetchManifest.has(key)) { browseFetchSeen.add(key); return; }
+        if (!matchesBrowseFetchFilter(item)) return;
+        if (browseFetchQueue.length >= BROWSE_FETCH_QUEUE_MAX) {
+            browseFetchStats.dropped++;
+            updateBrowseFetchBadge();
+            return;
+        }
+        browseFetchSeen.add(key);
+        browseFetchQueue.push({ item, pathname: pathname || '/' });
+        browseFetchStats.captured++;
+        updateBrowseFetchBadge();
+        startBrowseFetchWorkers();
+    }
+
+    // Opportunistic walk — scan unknown /backend/ responses for post- or task-shaped objects.
+    // Conservative: only inspect `items` / `data` / `posts` arrays; only one level deep.
+    function opportunisticIngest(data, url, pathname) {
+        if (!browseFetchEnabled || !data || typeof data !== 'object') return;
+        try {
+            const urlPath = (() => { try { return new URL(url, location.origin).pathname; } catch { return url; } })();
+            if (!browseFetchDiscoveredEndpoints.has(urlPath)) {
+                browseFetchDiscoveredEndpoints.add(urlPath);
+                log(`📡 Browse&Fetch: noticed unknown endpoint ${urlPath}`);
+            }
+            const candidates = [];
+            if (Array.isArray(data.items)) candidates.push(...data.items);
+            if (Array.isArray(data.data))  candidates.push(...data.data);
+            if (Array.isArray(data.posts)) candidates.push(...data.posts);
+            if (Array.isArray(data.results)) candidates.push(...data.results);
+            if (Array.isArray(data.generations)) candidates.push(...data.generations);
+            if (!candidates.length) return;
+            candidates.forEach(raw => {
+                const entry = normaliseOpportunisticItem(raw);
+                // Don't pollute `collected` (the active-scan list) with opportunistic finds — just enqueue.
+                if (entry) maybeEnqueueBrowseFetch(entry, pathname);
+            });
+        } catch (e) { /* silent — opportunistic is best-effort */ }
+    }
+
+    // Pull a minimal entry out of an unknown-shape post/task object. Returns null if nothing usable.
+    function normaliseOpportunisticItem(raw) {
+        if (!raw || typeof raw !== 'object') return null;
+        // v2 post-shaped
+        const post = raw.post ?? raw;
+        const att  = Array.isArray(post.attachments) ? post.attachments[0] : null;
+        if (att && (att.downloadable_url || att.encodings?.source?.path || att.url)) {
+            const postId = post.id ?? raw.id ?? '';
+            if (!postId) return null;
+            const dl = att.encodings?.source?.path ?? att.downloadable_url ?? att.download_urls?.watermark ?? att.url ?? null;
+            const w = att.width ?? null, h = att.height ?? null;
+            const ratio = (w && h) ? (() => { const g = gcd(w, h); return `${w/g}:${h/g}`; })() : null;
+            const date = post.posted_at ? new Date(post.posted_at * 1000).toISOString().slice(0, 10)
+                       : (post.updated_at ? new Date(post.updated_at * 1000).toISOString().slice(0, 10) : '');
+            return {
+                mode: 'v2', source: 'v2_opportunistic',
+                genId: att.id ?? att.generation_id ?? postId, taskId: att.task_id ?? null,
+                postId, date, prompt: post.text ?? post.caption ?? '',
+                downloadUrl: dl?.trim() ? dl : null, previewUrl: att.url ?? null,
+                width: w, height: h, ratio, duration: att.duration_s ?? null,
+                isLiked: post.user_liked === true,
+                likeCount: post.like_count ?? null,
+                author: raw.profile?.username ?? post.author?.username ?? null,
+                _raw: raw,
+            };
+        }
+        // v1 generation-shaped
+        if (raw.id && raw.url && (raw.task_id || raw.task_type || raw.created_at)) {
+            const genId = raw.id;
+            const w = raw.width ?? null, h = raw.height ?? null;
+            const ratio = (w && h) ? (() => { const g = gcd(w, h); return `${w/g}:${h/g}`; })() : null;
+            const taskType = (raw.task_type ?? '').toLowerCase();
+            const isVideo  = taskType.includes('vid') || (raw.n_frames ?? 1) > 1;
+            return {
+                mode: 'v1', source: 'v1_opportunistic', genId,
+                taskId: raw.task_id ?? '',
+                date: (raw.created_at ?? '').slice(0, 10),
+                prompt: raw.prompt ?? '',
+                pngUrl: String(raw.url).replace(/&amp;/g, '&'),
+                width: w, height: h, ratio,
+                quality: raw.quality ?? null, operation: raw.operation ?? null,
+                model: raw.model ?? null, seed: raw.seed ?? null,
+                taskType, nVariants: raw.n_variants ?? 1, isVideo,
+                author: raw.user?.username ?? null,
+                likeCount: raw.like_count ?? null,
+                _raw: raw,
+            };
+        }
+        return null;
+    }
+
+    // Manifest: load existing, append new, debounced write.
+    async function browseFetchLoadManifest() {
+        if (browseFetchManifestLoaded || !browseFetchRootDir) return;
+        browseFetchManifestLoaded = true;
+        try {
+            const fh = await browseFetchRootDir.getFileHandle(BROWSE_FETCH_MANIFEST_FILE, { create: false });
+            const f  = await fh.getFile();
+            const text = await f.text();
+            const data = JSON.parse(text);
+            const list = Array.isArray(data?.entries) ? data.entries : [];
+            list.forEach(e => { if (e?.key) { browseFetchManifest.set(e.key, e); browseFetchSeen.add(e.key); } });
+            log(`📡 Browse&Fetch: loaded manifest (${browseFetchManifest.size} existing entries)`);
+        } catch (e) {
+            if (e?.name !== 'NotFoundError') log(`⚠ Browse&Fetch: manifest read failed — ${e.message}`);
+        }
+    }
+
+    function browseFetchScheduleManifestWrite() {
+        browseFetchManifestDirty = true;
+        if (browseFetchManifestTimer) return;
+        browseFetchManifestTimer = setTimeout(async () => {
+            browseFetchManifestTimer = null;
+            if (!browseFetchManifestDirty) return;
+            browseFetchManifestDirty = false;
+            await browseFetchFlushManifest();
+        }, BROWSE_FETCH_MANIFEST_DEBOUNCE_MS);
+    }
+
+    async function browseFetchFlushManifest() {
+        if (!browseFetchRootDir) return;
+        const payload = {
+            version: 1,
+            updated_at: new Date().toISOString(),
+            count: browseFetchManifest.size,
+            entries: [...browseFetchManifest.values()],
+        };
+        try {
+            const fh = await browseFetchRootDir.getFileHandle(BROWSE_FETCH_MANIFEST_FILE, { create: true });
+            const w  = await fh.createWritable();
+            await w.write(JSON.stringify(payload, null, 2));
+            await w.close();
+        } catch (e) { log(`⚠ Browse&Fetch: manifest write failed — ${e.message}`); }
+    }
+
+    // Worker loop — pops from queue, downloads, writes manifest entry.
+    function startBrowseFetchWorkers() {
+        if (!browseFetchEnabled || browseFetchStopRequested) return;
+        while (browseFetchWorkersActive < BROWSE_FETCH_WORKERS && browseFetchQueue.length > 0) {
+            browseFetchWorkersActive++;
+            browseFetchWorkerLoop().finally(() => { browseFetchWorkersActive--; });
+        }
+    }
+
+    async function browseFetchWorkerLoop() {
+        while (browseFetchEnabled && !browseFetchStopRequested) {
+            const job = browseFetchQueue.shift();
+            if (!job) {
+                // idle — let the worker exit; new captures will restart via startBrowseFetchWorkers
+                return;
+            }
+            try { await browseFetchDownloadItem(job.item, job.pathname); }
+            catch (e) {
+                browseFetchStats.failed++;
+                log(`⚠ Browse&Fetch: "${(job.item.prompt || job.item.genId || '?').slice(0, 40)}" — ${e.message}`);
+            }
+            updateBrowseFetchBadge();
+        }
+    }
+
+    async function browseFetchDownloadItem(item, pathname) {
+        const key = browseFetchKey(item);
+        if (!key) return;
+        if (browseFetchManifest.has(key)) { browseFetchStats.skipped++; return; }
+
+        const segments = browseFetchBuildSegments(item, pathname);
+        const dir = await browseFetchResolveDir(segments);
+        if (!dir) throw new Error('folder unavailable');
+
+        const url = await getDownloadUrl(item);
+        if (!url) throw new Error('no download URL');
+
+        const ext = item.isVideo || item.mode === 'v2' ? 'mp4' : 'png';
+        const base = buildBase(item) || key;
+        const filename = `${base}.${ext}`;
+
+        const ok = await downloadFileFS(url, filename, dir);
+        if (!ok) throw new Error('download failed');
+
+        let txtFilename = null;
+        if (browseFetchFilters.saveTxt) {
+            txtFilename = `${base}.txt`;
+            try { await downloadTextFileFS(buildTxtContent(item), txtFilename, dir); }
+            catch (e) { /* non-fatal */ }
+        }
+
+        browseFetchManifest.set(key, {
+            key,
+            genId: item.genId || null,
+            postId: item.postId || null,
+            source: item.source,
+            mode: item.mode,
+            author: item.author || null,
+            captured_at: new Date().toISOString(),
+            captured_path: pathname || '/',
+            folder: segments.join('/'),
+            filename,
+            txt: txtFilename,
+            prompt: item.prompt || '',
+            likeCount: item.likeCount ?? null,
+        });
+        browseFetchScheduleManifestWrite();
+    }
+
+    async function enableBrowseFetch() {
+        if (browseFetchEnabled) return true;
+        if (!browseFetchBaseDir) {
+            try { browseFetchBaseDir = await window.showDirectoryPicker(); }
+            catch { return false; }
+        }
+        try { browseFetchRootDir = await browseFetchBaseDir.getDirectoryHandle(BROWSE_FETCH_ROOT_NAME, { create: true }); }
+        catch (e) { log(`⚠ Browse&Fetch: cannot open ${BROWSE_FETCH_ROOT_NAME}/ — ${e.message}`); return false; }
+        await browseFetchLoadManifest();
+        browseFetchEnabled = true;
+        browseFetchStopRequested = false;
+        log(`📡 Browse&Fetch: ON → ${BROWSE_FETCH_ROOT_NAME}/`);
+        updateBrowseFetchBadge();
+        return true;
+    }
+
+    async function disableBrowseFetch() {
+        browseFetchEnabled = false;
+        browseFetchStopRequested = true;
+        if (browseFetchManifestTimer) {
+            clearTimeout(browseFetchManifestTimer);
+            browseFetchManifestTimer = null;
+        }
+        if (browseFetchManifestDirty) {
+            browseFetchManifestDirty = false;
+            await browseFetchFlushManifest();
+        }
+        log(`📡 Browse&Fetch: OFF — captured ${browseFetchStats.captured}, failed ${browseFetchStats.failed}, dropped ${browseFetchStats.dropped}`);
+        updateBrowseFetchBadge();
+    }
+
+    function updateBrowseFetchBadge() {
+        const panel = document.getElementById('sdl');
+        if (panel) panel.classList.toggle('bf-on', browseFetchEnabled);
+        const el = document.getElementById('sdl-bf-badge');
+        if (!el) return;
+        if (!browseFetchEnabled) { el.textContent = '📡 Off'; el.className = 'sdl-bf-badge'; return; }
+        const queued = browseFetchQueue.length;
+        const done = browseFetchManifest.size;
+        el.textContent = queued > 0
+            ? `📡 ${browseFetchStats.captured} captured · ${queued} queued`
+            : `📡 ${done} saved`;
+        el.className = 'sdl-bf-badge on';
     }
 
     // =====================================================================
@@ -2447,6 +2819,83 @@
   text-align:center; margin-bottom:12px; line-height:1.5; display:none;
 }
 
+/* ── Section cards (v2.6.0) — Backup + Mirror ──────────────────── */
+.sdl-section {
+  border:0.5px solid rgba(255,255,255,0.08);
+  border-radius:12px; padding:10px 12px; margin-bottom:12px;
+  background:rgba(255,255,255,0.015);
+}
+.sdl-section-backup { /* neutral */ }
+.sdl-section-mirror {
+  background:rgba(96,165,250,0.04);
+  border-color:rgba(96,165,250,0.18);
+}
+.sdl-section-hd {
+  display:flex; align-items:center; gap:8px; margin-bottom:10px;
+  padding-bottom:8px; border-bottom:0.5px solid rgba(255,255,255,0.05);
+}
+.sdl-section-icon { font-size:14px; line-height:1; }
+.sdl-section-title {
+  font-size:12px; font-weight:600; color:rgba(255,255,255,0.82);
+  display:inline-flex; align-items:center; gap:5px;
+}
+.sdl-section-sub {
+  font-size:10px; color:rgba(255,255,255,0.32); flex:1;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.sdl-beta-tag {
+  font-size:8.5px; font-weight:600; padding:1px 6px; border-radius:4px;
+  background:rgba(251,191,36,0.15); color:rgba(251,191,36,0.85);
+  border:0.5px solid rgba(251,191,36,0.25);
+  letter-spacing:0.04em; text-transform:uppercase;
+}
+
+/* Header mini indicator — pulsing 📡 shown only when minimised AND Mirror is active */
+#sdl-bf-mini {
+  display:none; font-size:13px; line-height:1;
+  animation:sdl-bf-mini-pulse 1.8s ease-in-out infinite;
+}
+#sdl.collapsed.bf-on #sdl-bf-mini { display:inline-flex; }
+@keyframes sdl-bf-mini-pulse {
+  0%,100% { opacity:0.5; transform:scale(1); }
+  50%     { opacity:1;   transform:scale(1.12); }
+}
+
+/* ── Mirror tile internals ─────────────────────────────────────── */
+#sdl-bf-tile .sdl-section-title { flex:0 0 auto; }
+.sdl-bf-badge {
+  font-size:10px; padding:2px 8px; border-radius:20px; font-weight:500;
+  background:rgba(255,255,255,0.06); color:rgba(255,255,255,0.4);
+  border:0.5px solid rgba(255,255,255,0.1);
+}
+.sdl-bf-badge.on {
+  background:rgba(96,165,250,0.15); color:rgba(147,197,253,0.95);
+  border-color:rgba(96,165,250,0.35);
+}
+.sdl-bf-toggle { flex-shrink:0; }
+.sdl-bf-sub { font-size:10.5px; color:rgba(255,255,255,0.42); margin-top:5px; line-height:1.4; }
+.sdl-bf-folder {
+  font-size:10px; color:rgba(255,255,255,0.3); margin-bottom:8px;
+  word-break:break-all; font-family:monospace;
+}
+.sdl-bf-row { display:flex; gap:10px; align-items:center; margin-bottom:6px; }
+.sdl-bf-lbl {
+  display:block; font-size:10.5px; color:rgba(255,255,255,0.55);
+  margin-bottom:6px;
+}
+.sdl-bf-lbl-inline {
+  display:flex; align-items:center; gap:6px; margin-bottom:0;
+}
+.sdl-bf-input {
+  width:100%; margin-top:3px; padding:5px 8px; font-size:11px;
+  background:rgba(255,255,255,0.04); border:0.5px solid rgba(255,255,255,0.1);
+  border-radius:6px; color:rgba(255,255,255,0.85); box-sizing:border-box;
+  font-family:inherit; resize:vertical;
+}
+.sdl-bf-input-num { width:70px; }
+.sdl-bf-hint { font-size:9.5px; color:rgba(255,255,255,0.25); margin-top:6px; line-height:1.4; }
+.sdl-bf-hint code { font-family:monospace; color:rgba(147,197,253,0.7); }
+
 /* ── Source groups ─────────────────────────────────────────────── */
 .sdl-src-groups { margin-bottom:12px; display:flex; flex-direction:column; gap:10px; }
 .sdl-src-group {
@@ -2884,7 +3333,8 @@
        src="${ENV.LOGO_URL}"
        alt="SoraVault" referrerpolicy="no-referrer">
   <span id="sdl-logo-fb">🔐</span>
-  <span id="sdl-title">SoraVault 2.5</span>
+  <span id="sdl-title">SoraVault 2.6</span>
+  <span id="sdl-bf-mini" title="Mirror is active">📡</span>
   <span id="sdl-update-badge"></span>
   <div id="sdl-header-right">
         
@@ -2909,6 +3359,15 @@
 
   <!-- ─── STATE: init ──────────────────────────────────────── -->
   <div id="sdl-s-init">
+
+    <!-- ── BACKUP section ───────────────────────────────────── -->
+    <div class="sdl-section sdl-section-backup">
+      <div class="sdl-section-hd">
+        <span class="sdl-section-icon">💾</span>
+        <span class="sdl-section-title">Backup</span>
+        <span class="sdl-section-sub">scan &amp; download your library</span>
+      </div>
+
     <div class="sdl-src-groups">
 
       <!-- Sora 1 -->
@@ -2969,11 +3428,49 @@
 
     </div>
 
-    <div id="sdl-src-note">Works from any Sora page · no scrolling needed</div>
-    <button class="sdl-btn sdl-btn-primary" id="sdl-scan">Scan All</button>
-    <div style="font-size:10px;color:rgba(255,255,255,0.16);text-align:center;margin-top:6px;line-height:1.5;">
-      Full support on Chrome &amp; Edge · other browsers use Tampermonkey fallback
+      <div id="sdl-src-note">Works from any Sora page · no scrolling needed</div>
+      <button class="sdl-btn sdl-btn-primary" id="sdl-scan">Scan All</button>
+      <div style="font-size:10px;color:rgba(255,255,255,0.16);text-align:center;margin-top:6px;line-height:1.5;">
+        Full support on Chrome &amp; Edge · other browsers use Tampermonkey fallback
+      </div>
     </div>
+    <!-- /Backup section -->
+
+    <!-- ── MIRROR section (beta, passive capture while browsing) ── -->
+    <div class="sdl-section sdl-section-mirror" id="sdl-bf-tile">
+      <div class="sdl-section-hd">
+        <span class="sdl-section-icon">📡</span>
+        <span class="sdl-section-title">Mirror<span class="sdl-beta-tag">beta</span></span>
+        <span id="sdl-bf-badge" class="sdl-bf-badge">📡 Off</span>
+        <label class="sdl-toggle sdl-bf-toggle">
+          <input type="checkbox" id="sdl-bf-enable">
+          <div class="sdl-toggle-track"></div>
+          <div class="sdl-toggle-thumb"></div>
+        </label>
+      </div>
+      <div class="sdl-bf-sub">Browse Sora normally — I capture IDs you see and download in the background (4 workers).</div>
+      <div id="sdl-bf-body" style="display:none;">
+        <button class="sdl-btn sdl-btn-secondary" id="sdl-bf-pick" style="margin:6px 0;">📂 Pick folder…</button>
+        <div id="sdl-bf-folder" class="sdl-bf-folder">(no folder picked yet)</div>
+        <div class="sdl-bf-row">
+          <label class="sdl-bf-lbl">Min likes
+            <input type="number" id="sdl-bf-minlikes" min="0" value="0" class="sdl-bf-input sdl-bf-input-num">
+          </label>
+          <label class="sdl-bf-lbl sdl-bf-lbl-inline">Save prompts (.txt)
+            <input type="checkbox" id="sdl-bf-savetxt" checked>
+          </label>
+        </div>
+        <label class="sdl-bf-lbl">Include keywords (comma-separated — any match)
+          <textarea id="sdl-bf-include" class="sdl-bf-input" rows="1" placeholder="e.g. anime, cyberpunk"></textarea>
+        </label>
+        <label class="sdl-bf-lbl">Exclude keywords (comma-separated — skip on match)
+          <textarea id="sdl-bf-exclude" class="sdl-bf-input" rows="1" placeholder="e.g. nsfw"></textarea>
+        </label>
+        <div class="sdl-bf-hint">Saves to <code>mirror_browse/sora[1|2]_&lt;path&gt;/</code> · no watermark removal · append-only manifest · <strong>stops on page reload</strong></div>
+      </div>
+    </div>
+    <!-- /Mirror section -->
+
   </div>
 
   <!-- ─── STATE: scanning ──────────────────────────────────── -->
@@ -3351,6 +3848,48 @@
             setState('ready');
             rebuildAllChips();
             recomputeSelection();
+        });
+
+        // ── Browse & Fetch (v2.6.0) ─────────────────────────────────────
+        const bfEnable = document.getElementById('sdl-bf-enable');
+        const bfBody   = document.getElementById('sdl-bf-body');
+        const bfFolder = document.getElementById('sdl-bf-folder');
+        const bfMinLikes = document.getElementById('sdl-bf-minlikes');
+        const bfInclude  = document.getElementById('sdl-bf-include');
+        const bfExclude  = document.getElementById('sdl-bf-exclude');
+        const bfSaveTxt  = document.getElementById('sdl-bf-savetxt');
+        const bfPick     = document.getElementById('sdl-bf-pick');
+
+        const parseTerms = v => (v || '').split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
+        const syncBfFilters = () => {
+            browseFetchFilters.minLikes = Math.max(0, parseInt(bfMinLikes.value) || 0);
+            browseFetchFilters.include  = parseTerms(bfInclude.value);
+            browseFetchFilters.exclude  = parseTerms(bfExclude.value);
+            browseFetchFilters.saveTxt  = bfSaveTxt.checked;
+        };
+        bfMinLikes.addEventListener('input', syncBfFilters);
+        bfInclude.addEventListener('input',  syncBfFilters);
+        bfExclude.addEventListener('input',  syncBfFilters);
+        bfSaveTxt.addEventListener('change', syncBfFilters);
+
+        bfPick.addEventListener('click', async () => {
+            try {
+                browseFetchBaseDir = await window.showDirectoryPicker();
+                bfFolder.textContent = browseFetchBaseDir.name + '/';
+            } catch { /* user cancelled */ }
+        });
+
+        bfEnable.addEventListener('change', async () => {
+            if (bfEnable.checked) {
+                bfBody.style.display = '';
+                syncBfFilters();
+                const ok = await enableBrowseFetch();
+                if (!ok) { bfEnable.checked = false; bfBody.style.display = 'none'; return; }
+                if (browseFetchBaseDir) bfFolder.textContent = browseFetchBaseDir.name + '/' + BROWSE_FETCH_ROOT_NAME + '/';
+            } else {
+                await disableBrowseFetch();
+                bfBody.style.display = 'none';
+            }
         });
 
         document.getElementById('sdl-clear').addEventListener('click', () => {
