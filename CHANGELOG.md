@@ -7,6 +7,49 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ---
 
+## [2.7.0-preview] — 2026-04-22
+
+> **Preview release.** Characters backup (v2_my_characters) has not been
+> fully tested end-to-end — the owner's one character has no published posts
+> or drafts. If your characters have content and something is missed, please
+> [open an issue](https://github.com/charyou/SoraVault/issues/new?labels=characters&title=My+Characters+scan+feedback).
+
+### Added
+
+- **Creators (beta)** — a new tile below Mirror. Type Sora creator usernames
+  (comma-separated or Enter to add); each becomes a chip that validates live
+  against the Sora API, turning green with post/character counts on success or
+  red if the name isn't found. On Scan All, every valid creator's full post
+  history is fetched automatically and saved to `sora_v2_creators/{name}/`.
+  - **Remember creators across reloads** — toggle "Remember across reloads"
+    to persist your validated creator list in localStorage, so it survives
+    page reloads and tab switches. Re-validates in the background on restore.
+  - **Include characters** — with the checkbox on (default), each creator's
+    characters are also discovered and their posts + cameo appearances pulled
+    automatically into `sora_v2_creators/{name}/characters/{char}/`.
+  - Chips support × removal, `@` prefix stripping, and URL paste
+    (`sora.chatgpt.com/profile/…` → extracts the username).
+
+- **My Characters — preview** (`v2_my_characters`) — new scan source (off by
+  default; tick the checkbox to enable). Discovers all characters you own,
+  then fetches each character's published posts and cameo appearances. Also
+  probes three likely draft endpoints — if your character has drafts and
+  SoraVault misses them, please use the "report" link next to the checkbox.
+  Files land in `sora_v2_characters/{character_name}/`.
+
+### Changed
+
+- **Scan sources expanded from 7 to 8** — `v2_my_characters` added. Creators
+  scan (`v2_creator`) is activated via the Creators tile, not the source
+  checkbox list.
+- `fetchAllV2` now accepts an optional `contextTag` used to stamp
+  `creatorUsername` on ingested entries — downstream folder routing uses this
+  to nest creator content without a separate ingest path.
+- The main download pipeline's subfolder resolver now supports nested paths
+  (e.g. `sora_v2_creators/alice/characters/sparky/`). Was single-segment only.
+
+---
+
 ## [2.6.0] — 2026-04-20
 
 ### Added

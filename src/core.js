@@ -49,8 +49,8 @@
     // =====================================================================
     // CONFIG & RELEASE INFO
     // =====================================================================
-    const VERSION      = '2.6.0';
-    const RELEASE_DATE = '2026-04-20';
+    const VERSION      = '2.7.0';
+    const RELEASE_DATE = '2026-04-22';
     const GITHUB_REPO  = 'charyou/SoraVault';
     const SORA_SHUTDOWN = new Date('2026-04-26T00:00:00Z');
 
@@ -104,6 +104,7 @@
         { id: 'v2_liked',         icon: '♡',    label: 'Liked',         sub: 'V2 liked videos',       group: 'v2' },
         { id: 'v2_cameos',        icon: '👤',   label: 'Cameos',        sub: 'V2 posts featuring you', group: 'v2' },
         { id: 'v2_cameo_drafts',  icon: '👤📋', label: 'Cameo drafts',  sub: 'V2 drafts featuring you', group: 'v2' },
+        { id: 'v2_my_characters', icon: '🎭',   label: 'Characters',    sub: 'V2 your characters (preview)', group: 'v2' },
     ];
 
     // Human-readable labels for filter chips — keyed by source ID
@@ -115,6 +116,8 @@
         v2_liked:        'Liked',
         v2_cameos:       'Cameos',
         v2_cameo_drafts: 'Cameo drafts',
+        v2_my_characters: 'Characters',
+        v2_creator:      'Creators',
     };
 
     // Per-category subfolder names — keyed by source ID
@@ -127,6 +130,8 @@
         v2_liked:        'sora_v2_liked',
         v2_cameos:       'sora_v2_cameos',
         v2_cameo_drafts: 'sora_v2_cameo_drafts',
+        v2_my_characters: 'sora_v2_characters',
+        v2_creator:      'sora_v2_creators',
     };
 
     const SPEED_PRESETS = [
@@ -212,8 +217,14 @@
     let   browseFetchManifestLoaded = false;
     const browseFetchDiscoveredEndpoints = new Set();
 
-    // Source enable/disable state — all enabled by default
-    const enabledSources = new Set(SCAN_SOURCES.map(s => s.id));
+    // Creator Fetch state
+    let creatorFetchEnabled      = false;
+    let creatorFetchIncludeChars = true;
+    let creatorFetchPersist      = false;
+    const creators = [];  // Array<{ username, userId, state: 'checking'|'valid'|'invalid'|'error', postCount, characterCount, error? }>
+
+    // Source enable/disable state — all enabled by default except preview sources
+    const enabledSources = new Set(SCAN_SOURCES.filter(s => s.id !== 'v2_my_characters').map(s => s.id));
 
     // Per-source scan status
     const srcStatus = {};
@@ -440,7 +451,7 @@
     // =====================================================================
     // DATA INGESTION — V2 (Videos / Profile + Drafts + Liked)
     // =====================================================================
-    function ingestV2Page(data, url, sourceId, capturedPath = null) {
+    function ingestV2Page(data, url, sourceId, capturedPath = null, contextTag = null) {
         const isDrafts = sourceId === 'v2_drafts' || sourceId === 'v2_cameo_drafts' ||
                          (!sourceId && url && url.includes('/profile/drafts/'));
         const effectiveSource = sourceId ?? (isDrafts ? 'v2_drafts' : 'v2_profile');
@@ -490,6 +501,7 @@
                     downloadUrl, previewUrl: item.url ?? null, thumbUrl,
                     width: gw, height: gh, ratio,
                     duration: item.duration_s ?? null, model: null,
+                    creatorUsername: contextTag,
                     _raw: item,
                 };
                 collected.set(genId, entryD);
@@ -532,6 +544,7 @@
                     isLiked:  post.user_liked === true,
                     likeCount: post.like_count ?? null,
                     author:   item.profile?.username ?? null,
+                    creatorUsername: contextTag,
                     _raw: { post, profile: item.profile },
                 };
                 collected.set(postId, entryP);
@@ -1047,7 +1060,7 @@
     }
 
     function applyV2GeoBlock() {
-        const v2Ids = ['v2_profile', 'v2_drafts', 'v2_liked', 'v2_cameos', 'v2_cameo_drafts'];
+        const v2Ids = ['v2_profile', 'v2_drafts', 'v2_liked', 'v2_cameos', 'v2_cameo_drafts', 'v2_my_characters'];
         v2Ids.forEach(id => {
             const cb  = document.getElementById('sdl-src-cb-' + id);
             const row = document.getElementById('sdl-src-row-' + id);
@@ -1141,50 +1154,157 @@
         setSrcStatus('v1_liked', stopRequested ? 'skipped' : 'done');
     }
 
-    async function fetchAllV2(baseEndpoint, sourceId) {
-        log(`── ${sourceId} ──`);
+    async function fetchAllV2(baseEndpoint, sourceId, contextTag = null, opts = {}) {
+        const { quiet = false, silent = false } = opts;
+        if (!silent) log(`── ${sourceId}${contextTag ? ` · ${contextTag}` : ''} ──`);
         const base = `${location.origin}${baseEndpoint}`;
         let cursor = null, hasMore = true, page = 0;
         while (hasMore && !stopRequested) {
             page++;
-            const url = cursor ? `${base}&cursor=${encodeURIComponent(cursor)}` : base;
+            const sep = base.includes('?') ? '&' : '?';
+            const url = cursor ? `${base}${sep}cursor=${encodeURIComponent(cursor)}` : base;
             const r   = await fetchWithRetry(url, { credentials: 'include', headers: buildHeaders() });
-            if (!r) { setSrcStatus(sourceId, 'error'); return; }
+            if (!r) { if (!silent) setSrcStatus(sourceId, 'error'); return; }
             let data;
             try { data = await r.json(); }
-            catch(e) { log(`${sourceId}: JSON parse error`); setSrcStatus(sourceId, 'error'); return; }
-            const result = ingestV2Page(data, url, sourceId);
+            catch(e) { if (!silent) log(`${sourceId}: JSON parse error`); if (!silent) setSrcStatus(sourceId, 'error'); return; }
+            const result = ingestV2Page(data, url, sourceId, null, contextTag);
             hasMore = result.nextCursor != null;
             cursor  = result.nextCursor;
-            log(`${sourceId} p${page}: ${collected.size} items${hasMore ? '…' : ' ✓'}`);
+            if (!quiet) log(`${sourceId} p${page}: ${collected.size} items${hasMore ? '…' : ' ✓'}`);
             if (hasMore) await sleep(60);
         }
-        setSrcStatus(sourceId, stopRequested ? 'skipped' : 'done');
+        if (!silent) setSrcStatus(sourceId, stopRequested ? 'skipped' : 'done');
+    }
+
+    // Resolve the authenticated user's ID via /v2/me — cached for the session.
+    // Returns the user_id string, or null if it couldn't be captured.
+    async function ensureCachedUserId(logPrefix = 'V2') {
+        if (cachedUserId) return cachedUserId;
+        const r = await fetchWithRetry(
+            `${location.origin}/backend/project_y/v2/me`,
+            { credentials: 'include', headers: buildHeaders() }
+        );
+        if (!r) { log(`${logPrefix}: could not fetch /v2/me`); return null; }
+        try {
+            const d = await r.json();
+            cachedUserId = d?.profile?.user_id ?? null;
+        } catch(e) {
+            log(`${logPrefix}: /v2/me parse error`);
+            return null;
+        }
+        if (!cachedUserId) { log(`${logPrefix}: no user_id in /v2/me`); return null; }
+        log(`${logPrefix}: user_id captured`);
+        return cachedUserId;
     }
 
     async function fetchAllV2Liked() {
         log('── V2 Liked ──');
-        if (!cachedUserId) {
-            const r = await fetchWithRetry(
-                `${location.origin}/backend/project_y/v2/me`,
-                { credentials: 'include', headers: buildHeaders() }
-            );
-            if (!r) { log('V2 liked: could not fetch /v2/me'); setSrcStatus('v2_liked', 'error'); return; }
-            try {
-                const d = await r.json();
-                cachedUserId = d?.profile?.user_id ?? null;
-            } catch(e) {
-                log('V2 liked: /v2/me parse error');
-                setSrcStatus('v2_liked', 'error');
-                return;
-            }
-            if (!cachedUserId) { log('V2 liked: no user_id in /v2/me'); setSrcStatus('v2_liked', 'error'); return; }
-            log(`V2 liked: user_id captured`);
-        }
+        const uid = await ensureCachedUserId('V2 liked');
+        if (!uid) { setSrcStatus('v2_liked', 'error'); return; }
         await fetchAllV2(
-            `/backend/project_y/profile/${cachedUserId}/post_listing/likes?limit=8`,
+            `/backend/project_y/profile/${uid}/post_listing/likes?limit=8`,
             'v2_liked'
         );
+    }
+
+    // Character drafts endpoint is not publicly documented. Probe common shapes;
+    // first 200 wins and is remembered for the rest of the scan. 404 → silent skip.
+    let charDraftsEndpointTemplate = null;  // e.g. "/backend/project_y/profile/{id}/drafts/v2?limit=15"
+
+    async function fetchCharacterDrafts(chId, characterUsername) {
+        const candidates = charDraftsEndpointTemplate
+            ? [charDraftsEndpointTemplate]
+            : [
+                `/backend/project_y/profile/${chId}/drafts/v2?limit=15`,
+                `/backend/project_y/profile/drafts/characters?character_id=${chId}&limit=15`,
+                `/backend/project_y/profile/drafts/v2?character_id=${chId}&limit=15`,
+            ];
+        for (const endpoint of candidates) {
+            const url = `${location.origin}${endpoint}`;
+            const r = await fetchWithRetry(url, { credentials: 'include', headers: buildHeaders() });
+            if (!r) continue;
+            if (r.status === 404) continue;
+            if (!r.ok) { log(`🎭 ${characterUsername}: drafts probe ${r.status}`); continue; }
+            let data;
+            try { data = await r.json(); } catch(e) { continue; }
+            if (!data || !Array.isArray(data.items)) continue;
+            if (!charDraftsEndpointTemplate && endpoint.includes(chId)) {
+                charDraftsEndpointTemplate = endpoint.replace(chId, '{id}');
+            }
+            ingestV2Page(data, url, 'v2_my_characters', null, characterUsername);
+            // Drain cursor manually (drafts pages rarely have many, but still)
+            let cursor = data.cursor ?? null;
+            while (cursor && !stopRequested) {
+                const sep = endpoint.includes('?') ? '&' : '?';
+                const nextUrl = `${location.origin}${endpoint}${sep}cursor=${encodeURIComponent(cursor)}`;
+                const rn = await fetchWithRetry(nextUrl, { credentials: 'include', headers: buildHeaders() });
+                if (!rn || !rn.ok) break;
+                let dn;
+                try { dn = await rn.json(); } catch(e) { break; }
+                const res = ingestV2Page(dn, nextUrl, 'v2_my_characters', null, characterUsername);
+                cursor = res.nextCursor;
+                if (cursor) await sleep(60);
+            }
+            return true;
+        }
+        return false;
+    }
+
+    async function fetchCharactersOfUser(userId, onCharacter, statusId = null) {
+        const base = `${location.origin}/backend/project_y/profile/${userId}/characters?limit=20`;
+        let cursor = null, hasMore = true;
+        while (hasMore && !stopRequested) {
+            const sep = base.includes('?') ? '&' : '?';
+            const url = cursor ? `${base}${sep}cursor=${encodeURIComponent(cursor)}` : base;
+            const r = await fetchWithRetry(url, { credentials: 'include', headers: buildHeaders() });
+            if (!r) { if (statusId) setSrcStatus(statusId, 'error'); return; }
+            let data;
+            try { data = await r.json(); }
+            catch(e) { if (statusId) { log(`${statusId}: characters JSON parse error`); setSrcStatus(statusId, 'error'); } return; }
+            const items = Array.isArray(data?.items) ? data.items : [];
+            for (const ch of items) {
+                if (stopRequested) return;
+                try { await onCharacter(ch); }
+                catch (e) { log(`🎭 error processing character: ${e.message}`); }
+            }
+            cursor = data?.cursor ?? null;
+            hasMore = cursor != null;
+            if (hasMore) await sleep(60);
+        }
+    }
+
+    async function fetchAllV2MyCharacters() {
+        log('── My Characters (preview) ──');
+        const uid = await ensureCachedUserId('V2 chars');
+        if (!uid) { setSrcStatus('v2_my_characters', 'error'); return; }
+
+        let charCount = 0;
+        await fetchCharactersOfUser(uid, async (ch) => {
+            const chId = ch?.user_id;
+            const username = ch?.username ?? 'unknown';
+            const display  = ch?.display_name ?? username;
+            if (!chId || !chId.startsWith('ch_')) return;
+            charCount++;
+            log(`🎭 ${display} (@${username})`);
+            await fetchAllV2(
+                `/backend/project_y/profile_feed/${chId}?limit=8&cut=nf2`,
+                'v2_my_characters', username, { quiet: true, silent: true }
+            );
+            await fetchAllV2(
+                `/backend/project_y/profile_feed/${chId}?limit=8&cut=appearances`,
+                'v2_my_characters', username, { quiet: true, silent: true }
+            );
+            const draftsFound = await fetchCharacterDrafts(chId, username);
+            if (!draftsFound && !charDraftsEndpointTemplate) {
+                log(`🎭 ${username}: drafts endpoint not found (posts + appearances captured)`);
+            }
+        }, 'v2_my_characters');
+
+        if (charCount === 0) {
+            log('🎭 No characters found for your account.');
+        }
+        setSrcStatus('v2_my_characters', stopRequested ? 'skipped' : 'done');
     }
 
     // Orchestrator
@@ -1215,6 +1335,7 @@
             v2_liked:        fetchAllV2Liked,
             v2_cameos:       () => fetchAllV2('/backend/project_y/profile_feed/me?limit=8&cut=appearances', 'v2_cameos'),
             v2_cameo_drafts: () => fetchAllV2('/backend/project_y/profile/drafts/cameos?limit=15', 'v2_cameo_drafts'),
+            v2_my_characters: fetchAllV2MyCharacters,
         };
 
         for (const src of SCAN_SOURCES) {
@@ -1225,6 +1346,44 @@
             }
             setSrcStatus(src.id, 'active');
             await FETCH_MAP[src.id]();
+        }
+
+        // Creator fetch — activated via the Creators tile, independent of SCAN_SOURCES.
+        if (creatorFetchEnabled && !stopRequested) {
+            const valid = creators.filter(c => c.state === 'valid' && c.userId);
+            if (valid.length > 0) {
+                log(`── Creators (${valid.length}) ──`);
+                for (const c of valid) {
+                    if (stopRequested) break;
+                    log(`👤 ${c.username}`);
+                    await fetchAllV2(
+                        `/backend/project_y/profile_feed/${c.userId}?limit=8&cut=nf2`,
+                        'v2_creator', c.username, { quiet: true, silent: true }
+                    );
+                    if (creatorFetchIncludeChars) {
+                        await fetchCharactersOfUser(c.userId, async (ch) => {
+                            const chId = ch?.user_id;
+                            const chUsername = ch?.username ?? 'unknown';
+                            const chDisplay  = ch?.display_name ?? chUsername;
+                            if (!chId || !chId.startsWith('ch_')) return;
+                            log(`👤 ${c.username} → 🎭 ${chDisplay} (@${chUsername})`);
+                            // For nested character content we still want the creator bucket,
+                            // but ingestV2Page writes author = item.profile.username (= the character),
+                            // which getSubfolderName combines with creatorUsername for the right path.
+                            const tag = c.username;
+                            await fetchAllV2(
+                                `/backend/project_y/profile_feed/${chId}?limit=8&cut=nf2`,
+                                'v2_creator', tag, { quiet: true, silent: true }
+                            );
+                            await fetchAllV2(
+                                `/backend/project_y/profile_feed/${chId}?limit=8&cut=appearances`,
+                                'v2_creator', tag, { quiet: true, silent: true }
+                            );
+                        });
+                    }
+                }
+                log(`Creators ✓  · total ${collected.size}`);
+            }
         }
     }
 
@@ -1279,6 +1438,18 @@
         if (item.mode === 'v1') {
             if (item.source === 'v1_liked') return SUBFOLDERS.v1_liked;
             return item.isVideo ? SUBFOLDERS.v1_videos : SUBFOLDERS.v1_library;
+        }
+        if (item.source === 'v2_my_characters') {
+            const char = sanitiseSegment(item.author ?? 'unknown');
+            return `${SUBFOLDERS.v2_my_characters}/${char}`;
+        }
+        if (item.source === 'v2_creator') {
+            const creator = sanitiseSegment(item.creatorUsername ?? 'unknown');
+            const char    = item.author && item.author !== item.creatorUsername
+                ? sanitiseSegment(item.author) : null;
+            return char
+                ? `${SUBFOLDERS.v2_creator}/${creator}/characters/${char}`
+                : `${SUBFOLDERS.v2_creator}/${creator}`;
         }
         return SUBFOLDERS[item.source] ?? SUBFOLDERS.v2_profile;
     }
@@ -1638,7 +1809,11 @@
     }
 
     function isWatermarkRemovalSourceSupported(item) {
-        return item?.source === 'v2_profile' || item?.source === 'v2_liked' || item?.source === 'v2_cameos';
+        return item?.source === 'v2_profile'
+            || item?.source === 'v2_liked'
+            || item?.source === 'v2_cameos'
+            || item?.source === 'v2_my_characters'
+            || item?.source === 'v2_creator';
     }
 
     function isWatermarkProxyEligible(item, directUrl) {
@@ -2258,8 +2433,17 @@
         async function getSubDir(item) {
             const name = getSubfolderName(item);
             if (!subDirCache[name]) {
-                try { subDirCache[name] = await baseDir.getDirectoryHandle(name, { create: true }); }
-                catch(e) { log(`Could not create subfolder "${name}", using root.`); subDirCache[name] = baseDir; }
+                const segments = name.split('/').filter(Boolean);
+                let dir = baseDir;
+                try {
+                    for (const seg of segments) {
+                        dir = await dir.getDirectoryHandle(seg, { create: true });
+                    }
+                    subDirCache[name] = dir;
+                } catch(e) {
+                    log(`Could not create subfolder "${name}", using root.`);
+                    subDirCache[name] = baseDir;
+                }
             }
             return subDirCache[name];
         }
@@ -2896,6 +3080,41 @@
 .sdl-bf-hint { font-size:9.5px; color:rgba(255,255,255,0.25); margin-top:6px; line-height:1.4; }
 .sdl-bf-hint code { font-family:monospace; color:rgba(147,197,253,0.7); }
 
+/* ── Creator chips (sdl-cf-*) ─────────────────────────────────── */
+.sdl-cf-chips { display:flex; flex-wrap:wrap; gap:5px; margin:2px 0 6px; min-height:4px; }
+.sdl-cf-chip {
+  display:inline-flex; align-items:center; gap:5px; padding:3px 6px 3px 9px;
+  background:rgba(255,255,255,0.05); border:0.5px solid rgba(255,255,255,0.12);
+  border-radius:14px; font-size:11px; color:rgba(255,255,255,0.8);
+  line-height:1.2; max-width:100%;
+}
+.sdl-cf-chip .sdl-cf-chip-name { font-weight:500; }
+.sdl-cf-chip .sdl-cf-chip-meta { font-size:9.5px; color:rgba(255,255,255,0.4); margin-left:2px; }
+.sdl-cf-chip.state-checking { border-color:rgba(251,191,36,0.35); background:rgba(251,191,36,0.08); }
+.sdl-cf-chip.state-valid    { border-color:rgba(52,211,153,0.4);  background:rgba(52,211,153,0.1); }
+.sdl-cf-chip.state-valid .sdl-cf-chip-name { color:rgba(134,239,172,0.95); }
+.sdl-cf-chip.state-invalid  { border-color:rgba(248,113,113,0.4); background:rgba(248,113,113,0.08); text-decoration:line-through; opacity:0.7; }
+.sdl-cf-chip.state-error    { border-color:rgba(251,146,60,0.4);  background:rgba(251,146,60,0.08); }
+.sdl-cf-chip-x {
+  cursor:pointer; color:rgba(255,255,255,0.5);
+  padding:0 2px; font-size:12px; line-height:1;
+  background:none; border:0; font-family:inherit;
+}
+.sdl-cf-chip-x:hover { color:rgba(255,255,255,0.9); }
+
+/* Preview pill on source-row names ("Characters [preview]") */
+.sdl-preview-pill {
+  display:inline-block; font-size:8.5px; padding:1px 5px; border-radius:10px;
+  background:rgba(147,197,253,0.14); color:rgba(147,197,253,0.9);
+  border:0.5px solid rgba(147,197,253,0.3);
+  font-weight:500; letter-spacing:0.04em; text-transform:uppercase;
+  margin-left:5px; vertical-align:middle;
+}
+.sdl-src-report {
+  color:rgba(147,197,253,0.6); text-decoration:underline; text-underline-offset:1.5px;
+}
+.sdl-src-report:hover { color:rgba(147,197,253,0.95); }
+
 /* ── Source groups ─────────────────────────────────────────────── */
 .sdl-src-groups { margin-bottom:12px; display:flex; flex-direction:column; gap:10px; }
 .sdl-src-group {
@@ -3333,7 +3552,11 @@
        src="${ENV.LOGO_URL}"
        alt="SoraVault" referrerpolicy="no-referrer">
   <span id="sdl-logo-fb">🔐</span>
-  <span id="sdl-title">SoraVault 2.6</span>
+  <span id="sdl-title">SoraVault 2.7   
+  <span style="font-size: 8px; display: inline-block; transform: scale(0.8); transform-origin: left; opacity: 0.8;">
+     preview 
+  </span>
+  </span>
   <span id="sdl-bf-mini" title="Mirror is active">📡</span>
   <span id="sdl-update-badge"></span>
   <div id="sdl-header-right">
@@ -3424,6 +3647,14 @@
           <span class="sdl-src-name">Cameo drafts</span>
           <span class="sdl-src-sub">V2 drafts featuring you</span>
         </label>
+        <label class="sdl-src-row" id="sdl-src-row-v2_my_characters" title="Preview — your characters' posts + cameo appearances. Drafts endpoint is probed speculatively; please report issues.">
+          <input type="checkbox" id="sdl-src-cb-v2_my_characters">
+          <span class="sdl-src-icon">🎭</span>
+          <span class="sdl-src-name">Characters <span class="sdl-preview-pill">preview</span></span>
+          <span class="sdl-src-sub">Your characters' posts + appearances
+            · <a href="https://github.com/charyou/SoraVault/issues/new?labels=characters&amp;title=My+Characters+scan+feedback" target="_blank" rel="noopener" class="sdl-src-report">report</a>
+          </span>
+        </label>
       </div>
 
     </div>
@@ -3470,6 +3701,35 @@
       </div>
     </div>
     <!-- /Mirror section -->
+
+    <!-- ── CREATORS section (beta, bulk-fetch named creators) ── -->
+    <div class="sdl-section sdl-section-mirror" id="sdl-cf-tile">
+      <div class="sdl-section-hd">
+        <span class="sdl-section-icon">👥</span>
+        <span class="sdl-section-title">Creators<span class="sdl-beta-tag">beta</span></span>
+        <span id="sdl-cf-badge" class="sdl-bf-badge">👥 0</span>
+        <label class="sdl-toggle sdl-bf-toggle">
+          <input type="checkbox" id="sdl-cf-enable">
+          <div class="sdl-toggle-track"></div>
+          <div class="sdl-toggle-thumb"></div>
+        </label>
+      </div>
+      <div class="sdl-bf-sub">Add Sora 2 creators by username — each one's posts + characters get pulled on Scan.</div>
+      <div id="sdl-cf-body" style="display:none;">
+        <div id="sdl-cf-chips" class="sdl-cf-chips"></div>
+        <input id="sdl-cf-input" class="sdl-bf-input" placeholder="creator1, creator2, … (comma or Enter to add)" autocomplete="off" spellcheck="false">
+        <div class="sdl-bf-row">
+          <label class="sdl-bf-lbl sdl-bf-lbl-inline">Include each creator's characters
+            <input type="checkbox" id="sdl-cf-include-chars" checked>
+          </label>
+          <label class="sdl-bf-lbl sdl-bf-lbl-inline">Remember across reloads
+            <input type="checkbox" id="sdl-cf-persist">
+          </label>
+        </div>
+        <div class="sdl-bf-hint">Validates usernames live · persisted list stored locally · folder: <code>sora_v2_creators/&lt;name&gt;/</code></div>
+      </div>
+    </div>
+    <!-- /Creators section -->
 
   </div>
 
@@ -3891,6 +4151,191 @@
                 bfBody.style.display = 'none';
             }
         });
+
+        // ── Creators tile (v2.6.1) ──────────────────────────────────────
+        const cfEnable       = document.getElementById('sdl-cf-enable');
+        const cfBody         = document.getElementById('sdl-cf-body');
+        const cfInput        = document.getElementById('sdl-cf-input');
+        const cfChips        = document.getElementById('sdl-cf-chips');
+        const cfIncludeChars = document.getElementById('sdl-cf-include-chars');
+        const cfPersist      = document.getElementById('sdl-cf-persist');
+        const cfBadge        = document.getElementById('sdl-cf-badge');
+
+        const CREATORS_STORAGE_KEY = 'soravault:creators';
+
+        function normaliseCreatorInput(raw) {
+            let s = (raw || '').trim().toLowerCase();
+            s = s.replace(/^@/, '');
+            const m = s.match(/sora\.chatgpt\.com\/profile\/([^\/?#]+)/);
+            if (m) s = m[1];
+            return s.replace(/[^a-z0-9._-]/g, '');
+        }
+
+        function renderCreatorChips() {
+            cfChips.innerHTML = '';
+            creators.forEach((c, idx) => {
+                const chip = document.createElement('span');
+                chip.className = `sdl-cf-chip state-${c.state}`;
+                const name = document.createElement('span');
+                name.className = 'sdl-cf-chip-name';
+                name.textContent = c.username;
+                chip.appendChild(name);
+                if (c.state === 'valid' && (c.postCount != null || c.characterCount != null)) {
+                    const meta = document.createElement('span');
+                    meta.className = 'sdl-cf-chip-meta';
+                    const parts = [];
+                    if (c.postCount != null)      parts.push(`${c.postCount} posts`);
+                    if (c.characterCount != null) parts.push(`${c.characterCount} chars`);
+                    meta.textContent = parts.join(' · ');
+                    chip.appendChild(meta);
+                } else if (c.state === 'checking') {
+                    const meta = document.createElement('span');
+                    meta.className = 'sdl-cf-chip-meta';
+                    meta.textContent = '…';
+                    chip.appendChild(meta);
+                } else if (c.state === 'invalid') {
+                    const meta = document.createElement('span');
+                    meta.className = 'sdl-cf-chip-meta';
+                    meta.textContent = 'not found';
+                    chip.appendChild(meta);
+                }
+                const x = document.createElement('button');
+                x.type = 'button';
+                x.className = 'sdl-cf-chip-x';
+                x.textContent = '×';
+                x.title = 'Remove';
+                x.addEventListener('click', () => {
+                    creators.splice(idx, 1);
+                    renderCreatorChips();
+                    updateCreatorsBadge();
+                    persistCreatorsIfEnabled();
+                });
+                chip.appendChild(x);
+                cfChips.appendChild(chip);
+            });
+        }
+
+        function updateCreatorsBadge() {
+            const valid = creators.filter(c => c.state === 'valid').length;
+            cfBadge.textContent = `👥 ${valid}`;
+            cfBadge.classList.toggle('on', creatorFetchEnabled && valid > 0);
+        }
+
+        function persistCreatorsIfEnabled() {
+            if (!creatorFetchPersist) return;
+            try {
+                const data = creators
+                    .filter(c => c.state === 'valid')
+                    .map(c => ({ username: c.username, userId: c.userId }));
+                localStorage.setItem(CREATORS_STORAGE_KEY, JSON.stringify(data));
+            } catch (e) { /* quota or access denied — silently ignore */ }
+        }
+
+        async function validateCreator(creator) {
+            creator.state = 'checking';
+            renderCreatorChips();
+            try {
+                const r = await _fetch(
+                    `${location.origin}/backend/project_y/profile/username/${encodeURIComponent(creator.username)}`,
+                    { credentials: 'include', headers: buildHeaders() }
+                );
+                if (r.status === 404) {
+                    creator.state = 'invalid';
+                } else if (!r.ok) {
+                    creator.state = 'error';
+                    creator.error = `HTTP ${r.status}`;
+                } else {
+                    const d = await r.json();
+                    if (d && d.user_id) {
+                        creator.userId         = d.user_id;
+                        creator.postCount      = d.post_count ?? null;
+                        creator.characterCount = d.character_count ?? null;
+                        creator.state          = 'valid';
+                    } else {
+                        creator.state = 'invalid';
+                    }
+                }
+            } catch (e) {
+                creator.state = 'error';
+                creator.error = e.message;
+            }
+            renderCreatorChips();
+            updateCreatorsBadge();
+            persistCreatorsIfEnabled();
+        }
+
+        function addCreatorNames(raw) {
+            const parts = raw.split(',').map(normaliseCreatorInput).filter(Boolean);
+            for (const name of parts) {
+                if (creators.some(c => c.username === name)) continue;
+                const creator = { username: name, userId: null, state: 'checking' };
+                creators.push(creator);
+                validateCreator(creator);
+            }
+            renderCreatorChips();
+            updateCreatorsBadge();
+        }
+
+        cfInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ',') {
+                e.preventDefault();
+                if (cfInput.value.trim()) {
+                    addCreatorNames(cfInput.value);
+                    cfInput.value = '';
+                }
+            } else if (e.key === 'Backspace' && !cfInput.value && creators.length) {
+                creators.pop();
+                renderCreatorChips();
+                updateCreatorsBadge();
+                persistCreatorsIfEnabled();
+            }
+        });
+        cfInput.addEventListener('blur', () => {
+            if (cfInput.value.trim()) {
+                addCreatorNames(cfInput.value);
+                cfInput.value = '';
+            }
+        });
+        cfIncludeChars.addEventListener('change', () => { creatorFetchIncludeChars = cfIncludeChars.checked; });
+        cfPersist.addEventListener('change', () => {
+            creatorFetchPersist = cfPersist.checked;
+            if (creatorFetchPersist) persistCreatorsIfEnabled();
+            else try { localStorage.removeItem(CREATORS_STORAGE_KEY); } catch (e) {}
+        });
+        cfEnable.addEventListener('change', () => {
+            creatorFetchEnabled = cfEnable.checked;
+            cfBody.style.display = creatorFetchEnabled ? '' : 'none';
+            updateCreatorsBadge();
+        });
+
+        // Restore persisted creators on panel init
+        try {
+            const stored = localStorage.getItem(CREATORS_STORAGE_KEY);
+            if (stored) {
+                const arr = JSON.parse(stored);
+                if (Array.isArray(arr) && arr.length) {
+                    cfPersist.checked = true;
+                    creatorFetchPersist = true;
+                    cfEnable.checked = true;
+                    creatorFetchEnabled = true;
+                    cfBody.style.display = '';
+                    for (const entry of arr) {
+                        if (!entry || !entry.username) continue;
+                        if (creators.some(c => c.username === entry.username)) continue;
+                        const creator = {
+                            username: entry.username,
+                            userId: entry.userId ?? null,
+                            state: entry.userId ? 'valid' : 'checking',
+                        };
+                        creators.push(creator);
+                        // Revalidate in background — user_id may have changed
+                        validateCreator(creator);
+                    }
+                    renderCreatorChips();
+                    updateCreatorsBadge();
+                }
+            }
+        } catch (e) { /* corrupt storage — ignore */ }
 
         document.getElementById('sdl-clear').addEventListener('click', () => {
             collected.clear(); completedCount = 0; failedCount = 0; totalToDownload = 0;
