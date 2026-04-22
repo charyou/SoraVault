@@ -12,6 +12,17 @@ SoraVault is a free, API-driven tool to bulk export your OpenAI Sora library. Ea
 
 ---
 
+## 🆕 New in 2.7 (preview) — Characters & Creator Backup
+
+**Back up any public creator's library — and your own characters — in bulk.**
+Two new scan sources land in 2.7 as a preview: **My Characters** backs up your own character profiles, and the new **Creator** tile lets you type any creator username and fetch their entire published library (plus their characters, optionally).
+
+> **Preview note:** These features are functional but have rough edges. See the [limitations section below](#-creator-content-27-preview) before using on large creator libraries.
+
+[Jump to Creator Content details →](#-creator-content-27-preview)
+
+---
+
 ## 🆕 New in 2.6 — Mirror mode (beta)
 
 <img src="assets/feature_mirrormode.png" alt="SoraVault Mirror mode — passive capture while you browse Sora" width="720">
@@ -28,7 +39,7 @@ No scans, no waiting, no re-downloads. Turn it on, start scrolling, walk away.
 
 ## ⚡ What makes SoraVault different
 
-| Feature | SoraVault 2.6 | OpenAI Official Export | Manual Download | Other Tools |
+| Feature | SoraVault 2.7 Preview | OpenAI Official Export | Manual Download | Other Tools |
 |---------|-----------|------------------------|-----------------|-------------|
 | FREE | ✅ | ✅ | ✅ | ❌ (only limited) |
 | Videos (Sora v2 — Profile) | ✅ | ✅ (mixed with all ChatGPT data) | ❌ (one by one) | ❌ |
@@ -36,7 +47,9 @@ No scans, no waiting, no re-downloads. Turn it on, start scrolling, walk away.
 | Images (Sora v1) | ✅ | ✅ (mixed with all ChatGPT data) | ❌ (one by one) | Partial |
 | Liked Content (v1 & v2) | ✅ | ❌ | ❌ | ❌ |
 | Cameos & Cameo Drafts (Sora v2) | ✅ | ❌ | ❌ | ❌ |
-| **Mirror mode — passive capture while browsing** | ✅ **NEW** | ❌ | ❌ | ❌ |
+| **Mirror mode — passive capture while browsing** | ✅ | ❌ | ❌ | ❌ |
+| **My Characters backup** | ✅ **Preview** | ❌ | ❌ | ❌ |
+| **Creator library backup (by username)** | ✅ **Preview** | ❌ | ❌ | ❌ |
 | Original quality (full-res renders) | ✅ | ✅ | ✅ | ❌ (compressed) |
 | **Watermark-free downloads** ¹ | ✅ | ❌ | ❌ | ❌ |
 | Prompt saved as .txt sidecar | ✅ | ❌ | ❌ | ❌ |
@@ -134,6 +147,21 @@ scroll past and downloads it in the background with 4 parallel workers.
   A reload-resume flow is planned for the next release.
 - Watermark removal is intentionally skipped in Mirror mode. If you need
   watermark-free MP4s, use the regular Backup flow with watermark removal on.
+
+### 👤 Creator Content (2.7 Preview)
+
+Two new scan sources that ship as an opt-in preview. Both appear in the Backup panel — **My Characters** as an off-by-default checkbox, **Creator Backup** as a chip-input tile below Mirror.
+
+**My Characters** — lists all your character profiles, then for each character fetches published posts, cameo appearances, and probes for draft content. Files land in `sora_v2_characters/{character_name}/`.
+
+**Creator Backup** — type one or more creator usernames (comma-separated) into the chip input. Each chip is validated live against the API (green = found, with post and character counts; red = not found). SoraVault fetches their full published library, and optionally their characters' content too. Files land in `sora_v2_creators/{creator}/[characters/{character}/]`. Valid creators can be persisted across sessions via the "Remember" checkbox.
+
+**Known limitations**
+
+- **Scan sources must overlap.** The Scan button only activates when at least one of your own scan sources (Profile, Liked, etc.) is also checked. You don't have to download from them — just leave one ticked.
+- **Always fetches all characters.** If "Include characters" is on, SoraVault fetches every character of every creator regardless of how many posts they have. For large creator libraries this can take a long time. If you only want a creator's recent or popular posts, use **Mirror mode** instead: browse to their profile and SoraVault captures everything you scroll past — including your min-likes and keyword filters.
+- **Use the URL username, not the display name.** The username to enter is the one that appears in the creator's Sora profile URL (e.g. `charju` from `sora.chatgpt.com/profile/charju`), not the display name shown on their page. These can differ.
+- **My Characters workaround for zero-post characters.** If your character backup comes back empty, try adding yourself to the Creator Backup tile instead — it will capture all your public posts at minimum. This is a workaround; character backup hasn't been fully testable yet because the original developer's only character has no published posts.
 
 ### Full Library Support
 - **Sora v2 Videos** — Profile videos AND Draft videos, full resolution.
