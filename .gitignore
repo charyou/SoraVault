@@ -45,11 +45,13 @@ Thumbs.db
 # Claude Generated Files #
 ######################
 CLAUDE.md
+claude.md
 .claude/
 ! .claude/skills/
 CLAUDE.local.md
 sprint-notes.md
 notes/
+sprint/
 
 # Build output (testing only) #
 ######################
