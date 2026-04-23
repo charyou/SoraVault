@@ -27,7 +27,7 @@ It also redesigns the first screen around exclusive backup modes:
 
 - **Regular Backup** - the main path for backing up your own Sora 1 and Sora 2 content, even if you only have access to Sora 2.
 - **Creator Backup** - back up public Sora 2 creators by username, including their characters when enabled.
-- **Mirror Mode** - browse Sora normally and capture matching content in the background.
+- **Mirror Mode** - browse Sora normally and capture all matching content in the background automatically as you go.
 
 - **Cleaner startup UX** - modes can no longer be combined accidentally. Creator Backup no longer requires a regular source checkbox just to unlock Start Scan.
 
