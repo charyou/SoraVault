@@ -18,18 +18,18 @@ waiting for a platform export.
 
 <img src="assets/new-features.gif" alt="SoraVault 2.7 redesigned first screen with Creator Backup and Mirror Mode" width="720">
 
-SoraVault 2.7 redesigns the first screen around exclusive backup modes:
+SoraVault 2.7 adds two bigger backup upgrades:
 
-- **Regular Backup** - the main path for backing up your own Sora 1 and Sora 2
-  content, even then when you have only access to Sora 2
-- **Creator Backup** - back up public Sora 2 creators by username, including
-  their characters when enabled.
-- **Mirror Mode** - browse Sora normally and capture matching content in the
-  background.
-- **Likes range filter** - filter Regular Backup and Creator Backup results by
-  minimum and maximum like count before downloading.
-- **Cleaner startup UX** - modes cannot be combined accidentally. Creator Backup
-  no longer requires a regular source checkbox just to unlock Start Scan.
+- **Creator Backup** - add public Sora 2 creator usernames, and bulk-back up their full public post history including all their characters into dedicated creator folders. Filter by min. or max. likes to only fetch their most or medium popular content.
+- **Now Supported: Characters** - back up your characters, including posts and cameo appearances where available. This is still preview because I cannot fully test every character flow myself yet.
+
+It also redesigns the first screen around exclusive backup modes:
+
+- **Regular Backup** - the main path for backing up your own Sora 1 and Sora 2 content, even if you only have access to Sora 2.
+- **Creator Backup** - back up public Sora 2 creators by username, including their characters when enabled.
+- **Mirror Mode** - browse Sora normally and capture matching content in the background.
+
+- **Cleaner startup UX** - modes can no longer be combined accidentally. Creator Backup no longer requires a regular source checkbox just to unlock Start Scan.
 
 ---
 
