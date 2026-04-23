@@ -49,8 +49,8 @@
     // =====================================================================
     // CONFIG & RELEASE INFO
     // =====================================================================
-    const VERSION      = '2.7.0';
-    const RELEASE_DATE = '2026-04-23';
+    const VERSION      = '2.7.1';
+    const RELEASE_DATE = '2026-04-24';
     const GITHUB_REPO  = 'charyou/SoraVault';
     const SORA_SHUTDOWN = new Date('2026-04-26T00:00:00Z');
 
