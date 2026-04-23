@@ -1,0 +1,1848 @@
+// ==UserScript==
+// @name         Sora2 MP4 Batch Downloader v6.0
+// @namespace    sora-mp4-downloader
+// @version      6.0
+// @author       test.dummy
+// @description  Sora2 MP4 Batch Downloader v6.0 — 5-tab downloader with minimize, parallel workers, pause/resume, skip-existing disk scan, watermark removal, JSON export, live diagnostics, persistent folder picker, URL auto-refresh.
+// @match        https://sora.chatgpt.com/*
+// @grant        GM_download
+// @grant        GM_registerMenuCommand
+// @grant        GM_xmlhttpRequest
+// @connect      videos.openai.com
+// @connect      sora.chatgpt.com
+// @connect      *.blob.core.windows.net
+// @connect      *.openai.com
+// @connect      *
+// @homepageURL  https://github.com
+// @supportURL   https://github.com/issues
+// @run-at       document-idle
+// ==/UserScript==
+
+(() => {
+  "use strict";
+
+  /**********************
+   * Constants
+   **********************/
+  const VERSION          = "6.0";
+  const GITHUB_REPO      = ""; // e.g. "youruser/sora-mp4-downloader"
+  const STORE_MINIMIZED  = "sora2_v60_minimized";
+  const STORE_CATALOG    = "sora2_v60_catalog";
+  const STORE_DOWNLOADED = "sora2_v60_downloaded";
+
+  // Folder suffix per tab — final folder = "{character}_{suffix}"
+  const TAB_FOLDER_SUFFIX = {
+    "drafts":            "drafts",
+    "profile":           "profile",
+    "cameo-drafts":      "drafts",
+    "cameo-appearances": "cameos",
+    "liked":             "liked",
+  };
+
+  function folderForEntry(entry) {
+    const char   = (entry.character || "unknown").replace(/[\\\/:*?\"<>|]+/g, "_");
+    const suffix = TAB_FOLDER_SUFFIX[entry.tab] || "misc";
+    return `${char}_${suffix}`;
+  }
+
+
+  /**********************
+   * Diagnostics
+   * diag(level, ...msg) — timestamps every event and writes to an
+   * in-panel scrolling log as well as the browser console.
+   * Levels: "info" | "warn" | "error"
+   **********************/
+  let diagLines = [];
+  function diag(level, ...args) {
+    const ts  = new Date().toISOString().slice(11, 23);
+    const msg = args.map(a => (typeof a === "object" ? JSON.stringify(a) : String(a))).join(" ");
+    const line = `[${ts}] ${level.toUpperCase()}: ${msg}`;
+    if (level === "error")      console.error("[SoraMP4]", msg);
+    else if (level === "warn")  console.warn("[SoraMP4]", msg);
+    else                        console.log("[SoraMP4]", msg);
+    diagLines.push(line);
+    if (diagLines.length > 300) diagLines.shift();
+    const el = document.getElementById("sora-diag-log");
+    if (el) { el.textContent = diagLines.slice(-80).join("\n"); el.scrollTop = el.scrollHeight; }
+  }
+
+  /**********************
+   * State
+   **********************/
+  const catalog          = new Map();   // id → entry  (entry.kind = "draft" | "post")
+  const downloaded       = new Set();   // ids already saved to disk
+  let accessToken  = null;
+  let myUsername   = null;
+  let myUserId     = null;
+
+  // "drafts" | "profile" | "cameo-drafts" | "cameo-appearances" | "liked"
+  let activeTab = "drafts";
+
+  const state = { mode: "idle", cancel: false };
+  let _isMinimized = false;
+
+  // Parallel download workers state
+  let _workerCount   = 3;    // active concurrent downloads (user-configurable: 1–6)
+  let _isPaused      = false;
+  let _pauseGate     = Promise.resolve();
+  let _pauseResolver = null;
+
+  // Skip-existing (disk scan)
+  let _skipExistingEnabled = true;
+  const _existingFilesCache = new Map(); // folderName → Map<id, {size}>
+
+  // Watermark removal
+  let _watermarkEnabled  = false;
+  let _watermarkDisabled = false; // auto-disabled after 3 consecutive proxy failures
+  let _watermarkFailures = 0;
+
+  /**********************
+   * Persistence
+   **********************/
+  function saveCatalog() {
+    try { localStorage.setItem(STORE_CATALOG, JSON.stringify(Object.fromEntries(catalog))); } catch {}
+  }
+  function loadCatalog() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(STORE_CATALOG) || "{}");
+      for (const [k, v] of Object.entries(raw)) catalog.set(k, v);
+    } catch {}
+  }
+  function saveDownloaded() {
+    try { localStorage.setItem(STORE_DOWNLOADED, JSON.stringify([...downloaded])); } catch {}
+  }
+  function loadDownloaded() {
+    try {
+      JSON.parse(localStorage.getItem(STORE_DOWNLOADED) || "[]").forEach(id => downloaded.add(id));
+    } catch {}
+  }
+  function markDownloaded(id) {
+    downloaded.add(id);
+    saveDownloaded();
+    const e = catalog.get(id);
+    if (e) { e.selected = false; saveCatalog(); }
+  }
+  function clearTab(tabId) {
+    for (const [id, e] of catalog.entries()) {
+      if (e.tab === tabId) catalog.delete(id);
+    }
+    saveCatalog();
+    render();
+    setBusy("idle", `Cleared ${tabId} tab.`);
+  }
+  function clearAllCache() {
+    if (!confirm(
+      "⚠️ Clear ALL saved cache?\n\n" +
+      "This will permanently delete:\n" +
+      "  • The entire video catalog (all tabs)\n" +
+      "  • All download history (\"already downloaded\" memory)\n\n" +
+      "This cannot be undone. Continue?"
+    )) return;
+    catalog.clear();
+    downloaded.clear();
+    try { localStorage.removeItem(STORE_CATALOG); }    catch {}
+    try { localStorage.removeItem(STORE_DOWNLOADED); } catch {}
+    render();
+    setBusy("idle", "🗑 Cache cleared — starting fresh.");
+  }
+
+  /**********************
+   * Auth
+   **********************/
+  async function getToken() {
+    if (accessToken) return accessToken;
+    try {
+      const sess = await apiGet("/api/auth/session");
+      accessToken = sess.accessToken || null;
+      myUsername  = sess.user?.name || "sora_user";
+      return accessToken;
+    } catch { return null; }
+  }
+
+  async function loadMyProfile() {
+    try {
+      const tok = await getToken();
+      if (!tok) return;
+      const me = await apiGet("/backend/project_y/v2/me", tok);
+      myUsername = me.profile?.username || myUsername;
+      myUserId   = me.profile?.user_id  || null;
+    } catch {}
+  }
+
+  /**********************
+   * API
+   **********************/
+  function apiGet(path, token) {
+    return new Promise((resolve, reject) => {
+      const url = path.startsWith("http") ? path : location.origin + path;
+      const headers = { "Content-Type": "application/json" };
+      if (token) headers["Authorization"] = "Bearer " + token;
+      GM_xmlhttpRequest({
+        method: "GET", url, headers,
+        responseType: "text", anonymous: false,
+        timeout: 20000,  // 20s — prevents API calls hanging silently
+        onload: r => {
+          if (r.status >= 200 && r.status < 400) {
+            try { resolve(JSON.parse(r.responseText)); }
+            catch { resolve(r.responseText); }
+          } else {
+            reject(new Error(`HTTP ${r.status}: ${r.responseText?.slice(0, 200)}`));
+          }
+        },
+        onerror:   () => reject(new Error("Network error")),
+        ontimeout: () => reject(new Error("Timeout")),
+      });
+    });
+  }
+
+  async function fetchAllPages(endpointFn, extractor, token, label = "") {
+    const results = [];
+    let cursor = null, page = 0;
+    do {
+      const url = cursor
+        ? `${endpointFn()}&cursor=${encodeURIComponent(cursor)}`
+        : endpointFn();
+      setBusy("fetching", `${label} — page ${page + 1}… (${results.length} found)`);
+      try {
+        const data = await apiGet(url, token);
+        (data.items || []).forEach(item => {
+          const out = extractor(item);
+          if (Array.isArray(out)) out.forEach(e => e && results.push(e));
+          else if (out) results.push(out);
+        });
+        cursor = data.cursor || null;
+        page++;
+      } catch (e) {
+        diag("error", `Page fetch error: ${e?.message||e}`);
+        break;
+      }
+      if (state.cancel) break;
+      await sleep(200);
+    } while (cursor);
+    return results;
+  }
+
+  /**********************
+   * Extractors
+   **********************/
+  function extractDraft(item) {
+    const d = item.draft || item;
+    const sourceUrl = d.encodings?.source?.path || d.downloadable_url || d.url || "";
+    if (!sourceUrl || !d.id) return null;
+    return {
+      id:         d.id,
+      kind:       "draft",
+      prompt:     d.prompt || "",
+      created_at: d.created_at || null,
+      posted_at:  null,
+      width:      d.width  || null,
+      height:     d.height || null,
+      duration_s: d.duration_s || null,
+      size:       d.encodings?.source?.size || null,
+      sourceUrl,
+      character:  null,   // filled in by caller
+    };
+  }
+
+  function extractPost(item) {
+    const post = item.post;
+    if (!post) return null;
+    const postText = post.text || post.caption || "";
+    const postedAt = post.posted_at || null;
+    const results  = [];
+
+    (post.attachments || []).forEach(att => {
+      if (att.kind !== "sora") return;
+      const sourceUrl = att.encodings?.source?.path || att.downloadable_url || att.url || "";
+      if (!sourceUrl) return;
+      const id = att.generation_id || att.id;
+      if (!id) return;
+      results.push({
+        id,
+        kind:       "post",
+        prompt:     att.prompt || postText || "",
+        created_at: postedAt,
+        posted_at:  postedAt,
+        width:      att.width  || null,
+        height:     att.height || null,
+        duration_s: att.duration_s || null,
+        size:       att.encodings?.source?.size || null,
+        sourceUrl,
+        postId:     post.id,
+        postText,
+        isOwner:    post.is_owner || false,
+        character:  null,  // filled in by caller
+      });
+    });
+    return results;
+  }
+
+  /**********************
+   * Filename / Metadata
+   **********************/
+  const STOPWORDS = new Set([
+    "a","an","the","and","or","but","in","on","at","to","for","of","with","is",
+    "it","its","be","was","are","were","that","this","as","by","from","i","my",
+    "me","we","you","your","he","she","they","them","their","have","has","had",
+    "do","did","will","would","can","could","should","up","down","out","into",
+    "over","under","about","after","before","who","which","what","when","where",
+  ]);
+
+  function slugFromPrompt(prompt) {
+    if (!prompt) return "video";
+    return prompt
+      .toLowerCase()
+      .replace(/@\w+/g, "")
+      .replace(/[^a-z0-9\s]+/g, " ")
+      .split(/\s+/)
+      .filter(w => w.length > 1 && !STOPWORDS.has(w))
+      .slice(0, 6)
+      .join("_")
+      .slice(0, 40) || "video";
+  }
+
+  function formatDate(unixSecs) {
+    if (!unixSecs) return "00000000_0000";
+    const d = new Date(unixSecs * 1000);
+    const p = n => String(n).padStart(2, "0");
+    return `${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}`;
+  }
+
+  function uuid6(urlStr) {
+    try {
+      const decoded = decodeURIComponent(new URL(urlStr).pathname);
+      const m = decoded.match(/\/az\/files\/([^/]+)\/raw$/);
+      if (m) {
+        const seg = m[1];
+        const um = seg.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+        return (um ? um[1] : seg).replace(/-/g, "").slice(-6);
+      }
+    } catch {}
+    return "xxxxxx";
+  }
+
+  function buildFilename(entry) {
+    const ts   = entry.created_at || entry.posted_at;
+    const slug = slugFromPrompt(entry.prompt || entry.postText);
+    const uid  = uuid6(entry.sourceUrl);
+    return `${formatDate(ts)}_${slug}_${uid}`;
+  }
+
+  function buildSidecar(entry) {
+    const lines = [
+      `Kind:      ${entry.kind === "post" ? "Published Post" : "Draft"}`,
+      `ID:        ${entry.id}`,
+      `Character: ${entry.character || "unknown"}`,
+      `Created:   ${(entry.created_at || entry.posted_at)
+                    ? new Date((entry.created_at || entry.posted_at) * 1000).toISOString()
+                    : "unknown"}`,
+      `Size:      ${entry.size ? formatBytes(entry.size) : "unknown"}`,
+      `Dims:      ${entry.width || "?"}×${entry.height || "?"}`,
+      `Duration:  ${entry.duration_s || "?"}s`,
+      `Source:    ${entry.sourceUrl}`,
+    ];
+    if (entry.postId) lines.push(`Post ID:   ${entry.postId}`);
+    lines.push("", "--- PROMPT / POST TEXT ---");
+    lines.push(entry.prompt || entry.postText || "(none)");
+    return lines.join("\n");
+  }
+
+  function formatBytes(n) {
+    if (!n) return "";
+    const units = ["B","KB","MB","GB"];
+    let i = 0, x = n;
+    while (x >= 1024 && i < 3) { x /= 1024; i++; }
+    return `${x.toFixed(i ? 1 : 0)} ${units[i]}`;
+  }
+
+  function safeFilename(s) {
+    return (s || "").replace(/[\\/:*?"<>|]+/g, "_").trim().slice(0, 180);
+  }
+
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  /**********************
+   * Ingest
+   * character = username string, used to tag each entry
+   **********************/
+  function ingestEntries(entries, character) {
+    let added = 0;
+    for (const e of entries) {
+      if (!catalog.has(e.id)) {
+        if (character) e.character = character;
+        e.tab = activeTab; // record which tab fetched this entry
+        const base    = buildFilename(e);
+        e.filename    = safeFilename(base + ".mp4");
+        e.sidecarName = safeFilename(base + ".txt");
+        e.selected    = !downloaded.has(e.id);
+        catalog.set(e.id, e);
+        added++;
+      }
+    }
+    saveCatalog();
+    return added;
+  }
+
+  /**********************
+   * Page Context
+   **********************/
+  function getPageContext() {
+    const path = location.pathname;
+    const ownDrafts = path.match(/^\/profile\/([^/]+)\/drafts/);
+    if (ownDrafts) return { type: "own_drafts", username: ownDrafts[1] };
+    if (path === "/profile" || path === "/profile/") return { type: "own_profile" };
+    const prof = path.match(/^\/profile\/([^/]+)/);
+    if (prof) return { type: "profile", username: prof[1] };
+    return { type: "other" };
+  }
+
+  async function resolveCharacterId(username, token) {
+    try {
+      const p = await apiGet(`/backend/project_y/profile/username/${username}`, token);
+      return p.user_id || null;
+    } catch { return null; }
+  }
+
+  /**********************
+   * Fetch Functions — each fetches ONLY one kind
+   **********************/
+  async function fetchOwnDrafts(token) {
+    return fetchAllPages(
+      () => `/backend/project_y/profile/drafts/v2?limit=50`,
+      extractDraft, token, "Your drafts"
+    );
+  }
+
+  async function fetchOwnPosts(userId, token) {
+    return fetchAllPages(
+      () => `/backend/project_y/profile_feed/${userId}?limit=50&cut=posts`,
+      extractPost, token, "Your published posts"
+    );
+  }
+
+
+  async function fetchLikedVideos(token) {
+    return fetchAllPages(
+      () => `/backend/project_y/profile_feed/me?limit=50&cut=liked`,
+      extractPost, token, "Liked videos"
+    );
+  }
+
+  async function doFetchLiked() {
+    if (state.mode !== "idle") return;
+    state.cancel = false;
+    setBusy("fetching", "Authenticating…");
+    const token = await getToken();
+    if (!token) { setBusy("idle", "❌ Auth failed."); return; }
+    await loadMyProfile();
+    setBusy("fetching", "Fetching liked videos…");
+    const entries = await fetchLikedVideos(token);
+    if (state.cancel) { setBusy("idle", "Cancelled."); return; }
+    // Tag liked entries so they land in the liked tab
+    activeTab = "liked";
+    const added = ingestEntries(entries, myUsername || "me");
+    renderTabs();
+    setBusy("idle", `✅ Liked: ${entries.length} found | ${added} new`);
+    render();
+  }
+
+  async function fetchCharacterDrafts(chId, token) {
+    return fetchAllPages(
+      () => `/backend/project_y/profile/drafts/cameos/character/${chId}?limit=50`,
+      extractDraft, token, "Character drafts"
+    );
+  }
+
+  async function fetchCharacterAppearances(chId, token) {
+    return fetchAllPages(
+      () => `/backend/project_y/profile_feed/${chId}?limit=50&cut=appearances`,
+      extractPost, token, "Character published"
+    );
+  }
+
+  /**********************
+   * Fetch Actions — called from buttons, clearly separated
+   **********************/
+
+  // Fetch drafts for current page context → adds only to Drafts tab
+  async function doFetchDrafts() {
+    if (state.mode !== "idle") return;
+    state.cancel = false;
+    setBusy("fetching", "Authenticating…");
+
+    const token = await getToken();
+    if (!token) { setBusy("idle", "❌ Auth failed."); return; }
+    await loadMyProfile();
+
+    const ctx = getPageContext();
+    let entries = [], character = myUsername || "me";
+
+    if (ctx.type === "own_drafts" || ctx.type === "own_profile" || ctx.type === "other") {
+      setBusy("fetching", "Fetching your drafts…");
+      entries   = await fetchOwnDrafts(token);
+      character = myUsername || "me";
+
+    } else if (ctx.type === "profile") {
+      const username = ctx.username;
+      setBusy("fetching", `Resolving @${username}…`);
+      const chId = await resolveCharacterId(username, token);
+      if (!chId) { setBusy("idle", `❌ No character: @${username}`); return; }
+      setBusy("fetching", `Fetching @${username} drafts…`);
+      entries   = await fetchCharacterDrafts(chId, token);
+      character = username;
+    }
+
+    if (state.cancel) { setBusy("idle", "Cancelled."); return; }
+
+    const added = ingestEntries(entries, character);
+    activeTab = "drafts";
+    renderTabs();
+    setBusy("idle", `✅ Drafts: ${entries.length} found | ${added} new`);
+    render();
+  }
+
+  // Fetch published posts for current page context → adds only to Published tab
+  async function doFetchPublished() {
+    if (state.mode !== "idle") return;
+    state.cancel = false;
+    setBusy("fetching", "Authenticating…");
+
+    const token = await getToken();
+    if (!token) { setBusy("idle", "❌ Auth failed."); return; }
+    await loadMyProfile();
+
+    const ctx = getPageContext();
+    let entries = [], character = myUsername || "me";
+
+    if (ctx.type === "own_profile" || ctx.type === "own_drafts" || ctx.type === "other") {
+      if (!myUserId) { setBusy("idle", "❌ Could not resolve your user ID."); return; }
+      setBusy("fetching", "Fetching your published posts…");
+      entries   = await fetchOwnPosts(myUserId, token);
+      character = myUsername || "me";
+
+    } else if (ctx.type === "profile") {
+      const username = ctx.username;
+      setBusy("fetching", `Resolving @${username}…`);
+      const chId = await resolveCharacterId(username, token);
+      if (!chId) { setBusy("idle", `❌ No character: @${username}`); return; }
+      setBusy("fetching", `Fetching @${username} published…`);
+      entries   = await fetchCharacterAppearances(chId, token);
+      character = username;
+    }
+
+    if (state.cancel) { setBusy("idle", "Cancelled."); return; }
+
+    const added = ingestEntries(entries, character);
+    activeTab = "profile";
+    renderTabs();
+    setBusy("idle", `✅ Profile: ${entries.length} found | ${added} new`);
+    render();
+  }
+
+  // Cameo Username: Drafts tab — always fetches character cameo drafts
+  async function doFetchCameoDrafts() {
+    const username = prompt("Character username to fetch DRAFTS for (e.g. adr_t3):");
+    if (!username?.trim()) return;
+    const u = username.trim();
+    if (state.mode !== "idle") return;
+    state.cancel = false;
+    setBusy("fetching", "Authenticating…");
+    const token = await getToken();
+    if (!token) { setBusy("idle", "❌ Auth failed."); return; }
+    setBusy("fetching", `Resolving @${u}…`);
+    const chId = await resolveCharacterId(u, token);
+    if (!chId) { setBusy("idle", `❌ No character found: @${u}`); return; }
+    setBusy("fetching", `Fetching @${u} drafts…`);
+    const entries = await fetchCharacterDrafts(chId, token);
+    if (state.cancel) { setBusy("idle", "Cancelled."); return; }
+    const added = ingestEntries(entries, u);
+    activeTab = "cameo-drafts";
+    renderTabs();
+    setBusy("idle", `✅ @${u} drafts: ${entries.length} found | ${added} new`);
+    render();
+  }
+
+  // Cameo Username: Appearances tab — always fetches character published appearances
+  async function doFetchCameoAppearances() {
+    const username = prompt("Character username to fetch PUBLISHED APPEARANCES for (e.g. adr_t3):");
+    if (!username?.trim()) return;
+    const u = username.trim();
+    if (state.mode !== "idle") return;
+    state.cancel = false;
+    setBusy("fetching", "Authenticating…");
+    const token = await getToken();
+    if (!token) { setBusy("idle", "❌ Auth failed."); return; }
+    setBusy("fetching", `Resolving @${u}…`);
+    const chId = await resolveCharacterId(u, token);
+    if (!chId) { setBusy("idle", `❌ No character found: @${u}`); return; }
+    setBusy("fetching", `Fetching @${u} published appearances…`);
+    const entries = await fetchCharacterAppearances(chId, token);
+    if (state.cancel) { setBusy("idle", "Cancelled."); return; }
+    const added = ingestEntries(entries, u);
+    activeTab = "cameo-appearances";
+    renderTabs();
+    setBusy("idle", `✅ @${u} appearances: ${entries.length} found | ${added} new`);
+    render();
+  }
+
+  // Keep doFetchByUsername as no-op alias for menu compat
+  function doFetchByUsername() { doFetchCameoDrafts(); }
+
+  /**********************
+   * Download Folder Logic
+   * Single flat folder per entry: "{character}_{suffix}"
+   * e.g. hkj1_drafts, hkj1_profile, adr_t3_drafts, adr_t3_cameos
+   **********************/
+
+  // File System Access API (desktop)
+  let _fsBase = null, _fsBaseName = null, _fsDirCache = {};
+
+  async function getFsDir(folder) {
+    if (!_fsDirCache[folder]) {
+      try {
+        _fsDirCache[folder] = await _fsBase.getDirectoryHandle(folder, { create: true });
+      } catch { _fsDirCache[folder] = _fsBase; }
+    }
+    return _fsDirCache[folder];
+  }
+
+  async function fsWrite(blob, filename, dir) {
+    const fh = await dir.getFileHandle(filename, { create: true });
+    const w  = await fh.createWritable();
+    await w.write(blob); await w.close();
+  }
+
+  function fetchBlob(url) { return fetchBlobWithRetry(url); }
+
+  /**********************
+   * GM_download helpers (used when File System Access picker is unavailable/cancelled)
+   **********************/
+  function gmDownloadFile(url, folder, filename) {
+    return new Promise(resolve => {
+      try {
+        GM_download({
+          url,
+          name:    folder ? `${folder}/${filename}` : filename,
+          saveAs:  false,
+          onerror:   () => resolve(false),
+          ontimeout: () => resolve(false),
+          onload:    () => resolve(true),
+        });
+      } catch (e) {
+        diag("error", `GM_download threw: ${e?.message||e}`);
+        resolve(false);
+      }
+    });
+  }
+
+  function gmDownloadBlob(blob, folder, filename) {
+    const objUrl = URL.createObjectURL(blob);
+    try {
+      GM_download({
+        url:    objUrl,
+        name:   folder ? `${folder}/${filename}` : filename,
+        saveAs: false,
+        onload:  () => URL.revokeObjectURL(objUrl),
+        onerror: () => URL.revokeObjectURL(objUrl),
+      });
+    } catch (e) {
+      URL.revokeObjectURL(objUrl);
+      diag("error", `gmDownloadBlob threw: ${e?.message||e}`);
+    }
+  }
+
+
+  /**********************
+   * Folder Picker
+   * Lets the user choose (or change) the base download folder at any time,
+   * independent of clicking a download button. The chosen handle is reused
+   * across all subsequent downloads in this page session.
+   **********************/
+  async function doPickFolder() {
+    if (typeof window.showDirectoryPicker !== "function") {
+      alert("Your browser doesn\'t support the folder picker (requires Chrome/Edge 86+).\n\nOn Firefox, downloads go to your default Downloads folder automatically.");
+      return;
+    }
+    try {
+      const handle = await window.showDirectoryPicker({ mode: "readwrite" });
+      _fsBase     = handle;
+      _fsBaseName = handle.name;
+      _fsDirCache = {};
+      diag("info", `Folder set: ${_fsBaseName}`);
+      updateFolderHintUI();
+      setBusy("idle", `📁 Folder set: ${_fsBaseName}`);
+    } catch (err) {
+      if (err?.name !== "AbortError") {
+        diag("warn", `Folder picker error: ${err?.message||err}`);
+      }
+      // User cancelled — keep existing folder if any
+    }
+  }
+
+  function updateFolderHintUI() {
+    const hint = document.getElementById("sora-folder-hint");
+    const nameEl = document.getElementById("sora-folder-name");
+    const clearEl = document.getElementById("sora-folder-clear");
+    if (!hint) return;
+    const suffix = TAB_FOLDER_SUFFIX[activeTab] || "misc";
+    if (_fsBase && _fsBaseName) {
+      hint.innerHTML = "";
+      hint.style.color = "rgba(52,211,153,0.8)";
+      const icon = document.createElement("span");
+      icon.textContent = "📁 ";
+      const nameSpan = document.createElement("span");
+      nameSpan.id = "sora-folder-name";
+      nameSpan.textContent = `${_fsBaseName}  →  ${_fsBaseName}/${myUsername || "character"}_${suffix}/`;
+      nameSpan.style.cssText = "cursor:pointer;text-decoration:underline;text-underline-offset:3px;";
+      nameSpan.title = "Click to change folder";
+      nameSpan.onclick = () => doPickFolder();
+      const clearBtn = document.createElement("span");
+      clearBtn.id = "sora-folder-clear";
+      clearBtn.textContent = "  ✕ clear";
+      clearBtn.style.cssText = "opacity:0.4;cursor:pointer;margin-left:6px;font-size:10px;";
+      clearBtn.title = "Clear saved folder (will prompt again on next download)";
+      clearBtn.onclick = (e) => {
+        e.stopPropagation();
+        _fsBase = null; _fsBaseName = null; _fsDirCache = {};
+        diag("info", "Folder cleared — will prompt on next download");
+        updateFolderHintUI();
+        setBusy("idle", "📁 Folder cleared.");
+      };
+      hint.append(icon, nameSpan, clearBtn);
+    } else {
+      hint.textContent = `📂 No folder set — click \u2018Set Folder\u2019 or it will prompt on download. Saves to: ${myUsername || "character"}_${suffix}/`;
+      hint.style.color = "rgba(52,211,153,0.5)";
+    }
+  }
+
+
+  /**********************
+   * Pause / Resume
+   **********************/
+  function waitIfPaused() {
+    return _isPaused ? _pauseGate : Promise.resolve();
+  }
+  function pauseDownloads() {
+    if (_isPaused || state.mode === "idle") return;
+    _isPaused = true;
+    _pauseGate = new Promise(r => { _pauseResolver = r; });
+    const btn = document.getElementById("sora-btn-pause");
+    if (btn) { btn.textContent = "▶ Resume"; btn.style.background = "rgba(52,211,153,0.2)"; }
+    if (statusDiv) statusDiv.textContent = "⏸ Paused — in-flight downloads will finish.";
+    diag("info", "Paused.");
+  }
+  function resumeDownloads() {
+    if (!_isPaused) return;
+    _isPaused = false;
+    if (_pauseResolver) { _pauseResolver(); _pauseResolver = null; }
+    _pauseGate = Promise.resolve();
+    const btn = document.getElementById("sora-btn-pause");
+    if (btn) { btn.textContent = "⏸ Pause"; btn.style.background = "rgba(255,255,255,0.09)"; }
+    diag("info", "Resumed.");
+  }
+  function togglePause() {
+    if (state.mode === "idle") return;
+    if (_isPaused) resumeDownloads(); else pauseDownloads();
+  }
+
+  /**********************
+   * Filename safety
+   * Truncates filenames that exceed OS path limits gracefully.
+   **********************/
+  function truncFilename(name, maxLen) {
+    if (name.length <= maxLen) return name;
+    const dot = name.lastIndexOf(".");
+    const ext = dot > 0 ? name.slice(dot) : "";
+    return name.slice(0, maxLen - ext.length).replace(/_+$/, "") + ext;
+  }
+
+  /**********************
+   * Skip-existing (disk scan)
+   * Scans the actual folder on disk by file size threshold so we genuinely
+   * know what is already saved — not just what the script remembers.
+   * Thresholds: 3 MB for MP4 (Sora videos are always larger), 1 B for TXT.
+   **********************/
+  const SKIP_MIN_VIDEO_BYTES = 3 * 1024 * 1024;
+
+  async function scanExistingFolder(dirHandle) {
+    const map = new Map(); // id-token → size
+    if (!dirHandle || typeof dirHandle.values !== "function") return map;
+    try {
+      for await (const entry of dirHandle.values()) {
+        if (entry.kind !== "file") continue;
+        const name = entry.name;
+        let size = 0;
+        try { const f = await entry.getFile(); size = f.size; } catch {}
+        // Extract ID tokens: gen_xxx, bare UUID-like runs
+        const stem = name.replace(/\.[^.]+$/, "");
+        const tokens = stem.match(/(?:gen_|task_)?[A-Za-z0-9]{16,}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/g) || [];
+        tokens.push(stem); // exact-stem fallback
+        for (const tok of tokens) {
+          if (tok) map.set(tok, Math.max(map.get(tok) || 0, size));
+        }
+      }
+    } catch {}
+    return map;
+  }
+
+  async function getExistingMap(folderName, dirHandle) {
+    if (!_skipExistingEnabled || !dirHandle) return null;
+    if (!_existingFilesCache.has(folderName)) {
+      _existingFilesCache.set(folderName, await scanExistingFolder(dirHandle));
+    }
+    return _existingFilesCache.get(folderName);
+  }
+
+  function isAlreadyOnDisk(entry, existingMap) {
+    if (!existingMap) return false;
+    const candidates = [entry.id, entry.filename?.replace(/\.[^.]+$/, "")].filter(Boolean);
+    for (const c of candidates) {
+      const size = existingMap.get(c);
+      if (size != null && size >= SKIP_MIN_VIDEO_BYTES) return true;
+    }
+    return false;
+  }
+
+  /**********************
+   * fetchBlobWithRetry
+   * 2-attempt fetch with 30s timeout; falls back to GM_xmlhttpRequest on failure.
+   **********************/
+  function fetchBlobWithRetry(url) {
+    return new Promise((resolve, reject) => {
+      const short = url.slice(0, 110);
+      // Log URL expiry
+      try {
+        const se = new URL(url).searchParams.get("se");
+        if (se) {
+          const secsLeft = Math.round((new Date(se) - Date.now()) / 1000);
+          diag(secsLeft < 30 ? "error" : secsLeft < 120 ? "warn" : "info",
+            `URL expiry: ${se} (${secsLeft}s left)`);
+        }
+      } catch {}
+
+      let attempt = 0;
+      function tryFetch() {
+        attempt++;
+        diag("info", `fetchBlob attempt ${attempt} → ${short}`);
+        const t0 = Date.now();
+        GM_xmlhttpRequest({
+          method: "GET", url,
+          responseType: "arraybuffer",   // "blob" causes ERR_BLOB_OUT_OF_MEMORY in Chrome 147+
+          anonymous: true,
+          timeout: 45000,
+          headers: {
+            "Origin":       location.origin,
+            "Referer":      location.href,
+            "Cache-Control": "no-store",  // prevent 206 Partial Content from disk cache
+            "Pragma":       "no-cache",
+          },
+          onload: r => {
+            const ms = Date.now() - t0;
+            if (r.status >= 200 && r.status < 400 && r.response) {
+              // Convert ArrayBuffer → Blob here, after safe receipt
+              const blob = new Blob([r.response], { type: "video/mp4" });
+              diag("info", `fetchBlob ✅ ${r.status} in ${ms}ms bytes=${blob.size}`);
+              resolve(blob);
+            } else if (attempt < 2) {
+              diag("warn", `fetchBlob HTTP ${r.status} — retrying…`);
+              setTimeout(tryFetch, 1000);
+            } else {
+              diag("error", `fetchBlob ❌ HTTP ${r.status} after ${attempt} attempts — ${short}`);
+              reject(new Error(`HTTP ${r.status}`));
+            }
+          },
+          onerror: () => {
+            const ms = Date.now() - t0;
+            if (attempt < 2) {
+              diag("warn", `fetchBlob network error after ${ms}ms — retrying…`);
+              setTimeout(tryFetch, 1000);
+            } else {
+              diag("error", `fetchBlob ❌ NETWORK ERROR — check Tampermonkey @connect permissions. ${short}`);
+              reject(new Error("Network error"));
+            }
+          },
+          ontimeout: () => {
+            if (attempt < 2) {
+              diag("warn", "fetchBlob timeout — retrying…");
+              setTimeout(tryFetch, 500);
+            } else {
+              diag("error", `fetchBlob ❌ TIMEOUT — ${short}`);
+              reject(new Error("Timeout"));
+            }
+          },
+        });
+      }
+      tryFetch();
+    });
+  }
+
+  /**********************
+   * Watermark removal (optional, off by default)
+   * Proxies through soravdl.com to get watermark-free versions.
+   * Auto-disables after 3 consecutive proxy failures.
+   **********************/
+  const WM_PROXY_BASE = "https://soravdl.com/api/proxy/video/";
+  const SHARED_ID_RE  = /^s_[A-Za-z0-9_-]+$/;
+
+  function extractSharedVideoId(url) {
+    if (!url) return null;
+    const m = String(url).match(/(s_[A-Za-z0-9_-]+)/);
+    return (m && SHARED_ID_RE.test(m[1])) ? m[1] : null;
+  }
+
+  async function fetchWatermarkFreeBlob(entry) {
+    const videoId = extractSharedVideoId(entry.sourceUrl) || extractSharedVideoId(entry.id);
+    if (!videoId) throw new Error("No shared video ID for watermark proxy");
+    const proxyUrl = WM_PROXY_BASE + encodeURIComponent(videoId);
+    diag("info", `Watermark proxy: ${videoId}`);
+    const r = await fetch(proxyUrl, { headers: { accept: "video/*,*/*;q=0.8" } });
+    if (!r.ok) throw new Error(`Proxy HTTP ${r.status}`);
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    // Validate it's actually a video (ftyp MP4 magic bytes)
+    const isMp4 = bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70;
+    if (!isMp4) throw new Error("Proxy returned non-video payload");
+    if (bytes.length < 256 * 1024) throw new Error(`Proxy payload too small (${bytes.length} bytes)`);
+    return new Blob([bytes], { type: "video/mp4" });
+  }
+
+  /**********************
+   * Auto update check
+   **********************/
+  async function checkForUpdate() {
+    if (!GITHUB_REPO) return;
+    try {
+      const r = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`, {
+        headers: { Accept: "application/vnd.github.v3+json" }
+      });
+      if (!r.ok) return;
+      const data = await r.json();
+      const tag = (data.tag_name || "").replace(/^v/i, "");
+      if (tag && tag !== VERSION) {
+        const el = document.getElementById("sora-update-badge");
+        if (el) { el.textContent = `v${tag} available`; el.style.display = "inline-block"; }
+        diag("info", `Update available: v${tag}`);
+      }
+    } catch {}
+  }
+
+  /**********************
+   * URL Refresh
+   * Signed Azure blob URLs (encodings.source.path) expire within hours.
+   * The ONLY reliable way to get fresh URLs is to re-run the exact same API
+   * fetch that originally produced the entries, then upsert sourceUrl into
+   * every matching catalog entry (whether already downloaded or not).
+   *
+   * Key fix vs prior versions: ingestEntries() skips entries already in the
+   * catalog (catalog.has check), so it never updates sourceUrl on re-fetch.
+   * refreshCatalogUrls() bypasses that and force-updates sourceUrl directly.
+   * It also handles the case where entries were previously marked downloaded
+   * (selected:false) so force-download can still reach them.
+   **********************/
+  async function refreshCatalogUrls(token) {
+    setBusy("fetching", "Refreshing signed URLs…");
+    try {
+      let freshEntries = [];
+
+      if (activeTab === "drafts") {
+        freshEntries = await fetchOwnDrafts(token);
+
+      } else if (activeTab === "profile") {
+        if (!myUserId) await loadMyProfile();
+        if (myUserId) freshEntries = await fetchOwnPosts(myUserId, token);
+
+      } else if (activeTab === "cameo-drafts") {
+        const chars = [...new Set(
+          [...catalog.values()]
+            .filter(e => e.tab === "cameo-drafts")
+            .map(e => e.character).filter(Boolean)
+        )];
+        diag("info", `refreshCatalogUrls: cameo-drafts chars = ${JSON.stringify(chars)}`);
+        for (const u of chars) {
+          const chId = await resolveCharacterId(u, token);
+          diag(chId ? "info" : "error", `resolveCharacterId ${u} → ${chId}`);
+          if (chId) {
+            const entries = await fetchCharacterDrafts(chId, token);
+            diag("info", `fetched ${entries.length} fresh drafts for ${u}`);
+            entries.forEach(e => { e.character = u; freshEntries.push(e); });
+          }
+        }
+
+      } else if (activeTab === "cameo-appearances") {
+        const chars = [...new Set(
+          [...catalog.values()]
+            .filter(e => e.tab === "cameo-appearances")
+            .map(e => e.character).filter(Boolean)
+        )];
+        diag("info", `refreshCatalogUrls: cameo-appearances chars = ${JSON.stringify(chars)}`);
+        for (const u of chars) {
+          const chId = await resolveCharacterId(u, token);
+          diag(chId ? "info" : "error", `resolveCharacterId ${u} → ${chId}`);
+          if (chId) {
+            const entries = await fetchCharacterAppearances(chId, token);
+            diag("info", `fetched ${entries.length} fresh appearances for ${u}`);
+            entries.forEach(e => { e.character = u; freshEntries.push(e); });
+          }
+        }
+
+      } else if (activeTab === "liked") {
+        if (!myUserId) await loadMyProfile();
+        if (myUserId) {
+          freshEntries = await fetchLikedVideos(token);
+          diag("info", `fetched ${freshEntries.length} fresh liked videos`);
+        }
+      }
+
+      diag("info", `refresh result: ${freshEntries.length} from API | catalog tab size: ${[...catalog.values()].filter(e=>e.tab===activeTab).length}`);
+
+      // Force-update sourceUrl on every catalog entry we have a fresh record for.
+      // This works even if the entry was previously downloaded (selected:false).
+      let refreshed = 0, notFound = 0;
+      for (const fresh of freshEntries) {
+        const existing = catalog.get(fresh.id);
+        if (existing) {
+          if (fresh.sourceUrl) {
+            existing.sourceUrl = fresh.sourceUrl;
+            refreshed++;
+          }
+        } else {
+          notFound++;
+        }
+      }
+      diag(refreshed===0?"warn":"info", `URL update: ${refreshed} refreshed | ${notFound} not in catalog`);
+      saveCatalog();
+      setBusy("fetching", `URLs refreshed (${refreshed} updated). Starting downloads…`);
+      await sleep(400);
+    } catch (e) {
+      diag("error", `URL refresh exception: ${e?.message||e}`);
+      setBusy("fetching", "⚠️ URL refresh failed — attempting with cached URLs…");
+      await sleep(800);
+    }
+  }
+
+  // Standalone manual refresh (button handler) — refreshes then shows status, doesn't download
+  async function doManualRefreshUrls() {
+    if (state.mode !== "idle") return;
+    const token = await getToken();
+    if (!token) { setBusy("idle", "❌ Auth failed."); return; }
+    await loadMyProfile();
+    await refreshCatalogUrls(token);
+    setBusy("idle", "✅ URLs refreshed — ready to download.");
+  }
+
+  /**********************
+   * Start Downloads — parallel workers, pause/resume, skip-existing, watermark option
+   * all=false  → selected items only
+   * all=true   → all new (not yet downloaded)
+   * force=true → ALL items regardless of history
+   **********************/
+  async function startDownloads(all, force = false) {
+    if (state.mode !== "idle") return;
+
+    const tabKind = tabKindFor(activeTab);
+    const pool    = [...catalog.values()].filter(v => v.kind === tabKind && v.tab === activeTab);
+
+    let list;
+    if (force) {
+      list = pool;
+    } else if (all) {
+      list = pool.filter(v => !downloaded.has(v.id));
+    } else {
+      list = pool.filter(v => v.selected);
+    }
+
+    if (!list.length) {
+      alert(force
+        ? `No videos in the ${activeTab} tab to download.`
+        : all
+          ? `All ${activeTab} videos already downloaded. Use Force Download All to re-download.`
+          : `No ${activeTab} videos selected.`);
+      return;
+    }
+
+    if (force && list.length > 5) {
+      if (!confirm(`Force re-download all ${list.length} videos in "${activeTab}" tab?\n\nFiles will be saved again even if previously downloaded.`)) return;
+    }
+
+    state.cancel = false;
+    _isPaused = false;
+    _pauseGate = Promise.resolve();
+    _pauseResolver = null;
+    _watermarkDisabled = !_watermarkEnabled;
+    _watermarkFailures = 0;
+    _existingFilesCache.clear();
+
+    const token = await getToken();
+    if (token) {
+      await loadMyProfile();
+      await refreshCatalogUrls(token);
+    }
+    if (state.cancel) { setBusy("idle", "Cancelled."); return; }
+
+    // Re-build list after URL refresh
+    const refreshedPool = [...catalog.values()].filter(v => v.kind === tabKind && v.tab === activeTab);
+    if (force) {
+      list = refreshedPool;
+    } else if (all) {
+      list = refreshedPool.filter(v => !downloaded.has(v.id));
+    } else {
+      const selectedIds = new Set(list.map(v => v.id));
+      list = refreshedPool.filter(v => selectedIds.has(v.id) && v.selected);
+    }
+
+    diag("info", `startDownloads: ${list.length} items | force=${force} | workers=${_workerCount}`);
+    list.forEach((e,i) => diag("info", `  [${i}] id=${e.id} url=${e.sourceUrl?.slice(0,100)}`));
+
+    // Update pause button visibility
+    const pauseBtn = document.getElementById("sora-btn-pause");
+    if (pauseBtn) pauseBtn.style.display = "inline-block";
+
+    let method = "gm";
+    if (typeof window.showDirectoryPicker === "function") {
+      if (!_fsBase) {
+        try {
+          const handle = await window.showDirectoryPicker({ mode: "readwrite" });
+          _fsBase     = handle;
+          _fsBaseName = handle.name;
+          _fsDirCache = {};
+          diag("info", `Folder picker: chose "${_fsBaseName}"`);
+          updateFolderHintUI();
+        } catch (err) {
+          diag("warn", `Folder picker cancelled (${err?.message||err}) — using GM_download`);
+        }
+      } else {
+        diag("info", `Reusing saved folder: "${_fsBaseName}"`);
+      }
+      if (_fsBase) {
+        method = "fs";
+        diag("info", `Download method: File System Access → ${_fsBaseName}`);
+      }
+    } else {
+      diag("info", "showDirectoryPicker unavailable — using GM_download");
+    }
+
+    if (method === "gm" && typeof GM_download !== "function") {
+      diag("error", "GM_download not available — check Tampermonkey grants");
+      alert("GM_download not available. Check Tampermonkey grants."); return;
+    }
+
+    diag("info", `Download loop start: ${list.length} items via ${method} | ${_workerCount} workers`);
+    let ok = 0, fail = 0, skipped = 0;
+    let idx = 0;
+    const total = list.length;
+
+    setBusy("downloading", `Starting ${total} downloads…`);
+
+    async function worker() {
+      while (idx < total && !state.cancel) {
+        if (_isPaused) await waitIfPaused();
+        if (state.cancel) break;
+
+        const i     = idx++;
+        const entry = list[i];
+        const folder = folderForEntry(entry);
+
+        statusDiv.textContent = `[${i+1}/${total}] ✅${ok} ❌${fail} ⏭${skipped} — ${folder}/${entry.filename?.slice(0,24)}…`;
+        diag("info", `[${i+1}/${total}] ${entry.id} → ${folder}/${entry.filename?.slice(0,30)}`);
+
+        try {
+          let blob = null;
+
+          // Skip-existing check (FS mode only)
+          if (method === "fs" && _skipExistingEnabled && !force) {
+            let dir;
+            try { dir = await getFsDir(folder); } catch {}
+            if (dir) {
+              const existingMap = await getExistingMap(folder, dir);
+              if (isAlreadyOnDisk(entry, existingMap)) {
+                diag("info", `  ⏭ skipped (already on disk): ${entry.filename}`);
+                skipped++;
+                markDownloaded(entry.id);
+                render();
+                continue;
+              }
+            }
+          }
+
+          // Try watermark-free download first (if enabled)
+          if (_watermarkEnabled && !_watermarkDisabled && method === "fs") {
+            try {
+              blob = await fetchWatermarkFreeBlob(entry);
+              diag("info", `  ✅ watermark-free blob (${blob.size} bytes)`);
+            } catch (wmErr) {
+              diag("warn", `  Watermark proxy failed: ${wmErr?.message} — falling back to source`);
+              _watermarkFailures++;
+              if (_watermarkFailures >= 3) {
+                _watermarkDisabled = true;
+                diag("warn", "Watermark proxy disabled for this session (3 consecutive failures)");
+              }
+              blob = null;
+            }
+          }
+
+          // Standard download
+          if (!blob) blob = await fetchBlob(entry.sourceUrl);
+
+          // Safely truncate filename for OS limits
+          const safeFilename = truncFilename(entry.filename, 180);
+          const safeSidecar  = truncFilename(entry.sidecarName, 180);
+
+          if (method === "fs") {
+            const dir = await getFsDir(folder);
+            await fsWrite(blob, safeFilename, dir);
+            diag("info", `  ✅ wrote ${safeFilename} (${blob.size} bytes)`);
+            const txt = new Blob([buildSidecar(entry)], { type: "text/plain;charset=utf-8" });
+            await fsWrite(txt, safeSidecar, dir);
+          } else {
+            const ok2 = await gmDownloadFile(entry.sourceUrl, folder, safeFilename);
+            if (!ok2) throw new Error("GM_download failed");
+            diag("info", `  ✅ GM_download triggered ${safeFilename}`);
+            await sleep(400);
+            const txt = new Blob([buildSidecar(entry)], { type: "text/plain;charset=utf-8" });
+            gmDownloadBlob(txt, folder, safeSidecar);
+            await sleep(300);
+          }
+
+          markDownloaded(entry.id);
+          ok++;
+        } catch (e) {
+          diag("error", `Download FAIL id=${entry.id} err=${e?.message||e}`);
+          fail++;
+        }
+
+        render();
+        await sleep(150);
+      }
+    }
+
+    // Launch parallel workers
+    const workerCount = Math.min(_workerCount, list.length);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+    // Hide pause button when done
+    if (pauseBtn) pauseBtn.style.display = "none";
+    _isPaused = false;
+    if (_pauseResolver) { _pauseResolver(); _pauseResolver = null; }
+    _pauseGate = Promise.resolve();
+
+    const skipNote = skipped > 0 ? ` ⏭${skipped} skipped` : "";
+    setBusy("idle",
+      state.cancel
+        ? `Stopped. ✅${ok} saved${skipNote}.`
+        : `Done. ✅${ok} saved ❌${fail} failed${skipNote}${force ? " (forced)" : ""}. → ${_fsBaseName || "{character}_" + (TAB_FOLDER_SUFFIX[activeTab] || "misc")}/`
+    );
+    render();
+  }
+
+
+  /**********************
+   * UI — Tabbed Panel
+   **********************/
+  let panel, tabBarEl, listDiv, countDiv, statusDiv;
+  let btnFetchDrafts, btnFetchPublished, btnFetchChar;
+  let btnDlSelected, btnDlAll, btnDlForce, btnClearTab, btnClearAllCache, btnRefreshUrls, btnSetFolder, btnCancel, btnSelectToggle, btnPause;
+
+  function setBusy(mode, msg) {
+    state.mode = mode;
+    if (statusDiv) statusDiv.textContent = msg || "";
+    const busy = mode !== "idle";
+    [btnFetchDrafts, btnFetchPublished, btnFetchChar,
+     document.getElementById("sora-btn-fetch-app"),
+     document.getElementById("sora-btn-fetch-liked"),
+     btnDlSelected, btnDlAll, btnDlForce, btnClearTab, btnClearAllCache, btnRefreshUrls, btnSetFolder, btnSelectToggle].forEach(b => { if (b) b.disabled = busy; });
+    if (btnCancel) btnCancel.style.display = busy ? "inline-block" : "none";
+    // Pause button: only visible during active downloading (not fetching/refreshing)
+    if (btnPause) btnPause.style.display = (mode === "downloading") ? "inline-block" : "none";
+    if (mode === "idle") render();
+  }
+
+  function mkBtn(label, fn, bg) {
+    const b = document.createElement("button");
+    b.textContent = label; b.type = "button";
+    b.style.cssText = `
+      padding: 6px 11px; border-radius: 8px; cursor: pointer; font-size: 11px;
+      font-family: system-ui, sans-serif;
+      border: 1px solid rgba(255,255,255,0.18);
+      background: ${bg || "rgba(255,255,255,0.09)"}; color: #fff;
+    `;
+    b.onclick = fn;
+    b.onmouseenter = () => { if (!b.disabled) b.style.opacity = "0.8"; };
+    b.onmouseleave = () => { b.style.opacity = "1"; };
+    return b;
+  }
+
+  // Tab definitions: id, display label, which catalog kind it shows
+  const TAB_DEFS = [
+    { id: "drafts",             label: "Drafts",                    kind: "draft" },
+    { id: "profile",            label: "Profile",                   kind: "post"  },
+    { id: "cameo-drafts",       label: "Cameo: Drafts",             kind: "draft" },
+    { id: "cameo-appearances",  label: "Cameo: Appearances",        kind: "post"  },
+    { id: "liked",             label: "Liked",                     kind: "post"  },
+  ];
+
+  function tabKindFor(tabId) {
+    return TAB_DEFS.find(t => t.id === tabId)?.kind || "draft";
+  }
+
+  function renderTabs() {
+    if (!tabBarEl) return;
+    tabBarEl.innerHTML = "";
+
+    for (const def of TAB_DEFS) {
+      const isActive = def.id === activeTab;
+      const count    = [...catalog.values()].filter(e => e.kind === def.kind && e.tab === def.id).length;
+      const newCount = [...catalog.values()].filter(e => e.kind === def.kind && e.tab === def.id && !downloaded.has(e.id)).length;
+
+      const t = document.createElement("button");
+      t.type = "button";
+      t.style.cssText = `
+        padding: 7px 12px; font-size: 11px; font-weight: ${isActive ? "700" : "400"};
+        border: none; border-bottom: 2px solid ${isActive ? "#34d399" : "transparent"};
+        background: transparent; color: ${isActive ? "#fff" : "rgba(255,255,255,0.45)"};
+        cursor: pointer; font-family: system-ui, sans-serif;
+        white-space: nowrap; flex-shrink: 0;
+      `;
+      t.innerHTML = `${def.label} <span style="font-size:9px;opacity:.65;">${count}${newCount ? ` <span style="color:#34d399;">(${newCount}↑)</span>` : ""}</span>`;
+      t.onclick = () => { activeTab = def.id; renderTabs(); render(); };
+      tabBarEl.appendChild(t);
+    }
+  }
+
+  /**********************
+   * Minimize / Restore
+   * Collapses the panel to just the header bar. State is persisted to
+   * localStorage so it survives page reloads.
+   **********************/
+  function minimizePanel() {
+    _isMinimized = true;
+    try { localStorage.setItem(STORE_MINIMIZED, "1"); } catch {}
+    const body = document.getElementById("sora-panel-body");
+    if (body) body.style.display = "none";
+    // Shrink panel height to just the header
+    if (panel) {
+      panel.style.maxHeight = "none";
+      panel.style.height    = "auto";
+    }
+    const btn = document.getElementById("sora-minimize-btn");
+    if (btn) { btn.textContent = "□"; btn.title = "Restore panel"; }
+    diag("info", "Panel minimized.");
+  }
+
+  function restorePanel() {
+    _isMinimized = false;
+    try { localStorage.removeItem(STORE_MINIMIZED); } catch {}
+    const body = document.getElementById("sora-panel-body");
+    if (body) body.style.display = "flex";
+    if (panel) {
+      panel.style.height    = "";
+      panel.style.maxHeight = "78vh";
+    }
+    const btn = document.getElementById("sora-minimize-btn");
+    if (btn) { btn.textContent = "—"; btn.title = "Minimize panel"; }
+    diag("info", "Panel restored.");
+  }
+
+  function toggleMinimize() {
+    if (_isMinimized) restorePanel(); else minimizePanel();
+  }
+
+  function makePanel() {
+    if (panel) return;
+
+    panel = document.createElement("div");
+    panel.style.cssText = `
+      position: fixed; right: 14px; bottom: 14px; width: 580px; max-height: 78vh;
+      z-index: 999999; background: rgba(13,13,13,0.97); color: #fff;
+      border: 1px solid rgba(255,255,255,0.13); border-radius: 14px;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.55);
+      font: 12px/1.4 system-ui, sans-serif; display: flex; flex-direction: column;
+      overflow: hidden; backdrop-filter: blur(14px);
+    `;
+
+    // ── Header ──
+    const header = document.createElement("div");
+    header.style.cssText = `
+      padding: 10px 14px 8px; display: flex; justify-content: space-between; align-items: center;
+      border-bottom: 1px solid rgba(255,255,255,0.08); flex-shrink: 0;
+    `;
+    header.innerHTML = `
+      <div style="font-weight:700;font-size:13px;cursor:default;"
+           ondblclick="document.getElementById('sora-minimize-btn').click();"
+           title="Double-click to minimize">
+        Sora MP4 <span style="color:#34d399;">v${VERSION}</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <a href="https://www.buymeacoffee.com/" target="_blank"
+           style="display:inline-flex;align-items:center;gap:5px;padding:3px 9px;
+                  border-radius:6px;background:rgba(251,191,36,0.12);
+                  border:1px solid rgba(251,191,36,0.3);color:#fbbf24;
+                  font-size:10px;font-weight:600;text-decoration:none;
+                  font-family:system-ui,sans-serif;cursor:pointer;"
+           title="If this script saved you time, a coffee helps keep it maintained!">
+          ☕ Support
+        </a>
+        <div id="sora-v50-user" style="opacity:.5;font-size:11px;">@…</div>
+        <button id="sora-minimize-btn" type="button" title="Minimize panel"
+           style="background:none;border:1px solid rgba(255,255,255,0.18);
+                  border-radius:5px;color:rgba(255,255,255,0.55);
+                  font-size:13px;line-height:1;width:24px;height:24px;
+                  cursor:pointer;display:flex;align-items:center;justify-content:center;
+                  padding:0;font-family:system-ui,sans-serif;flex-shrink:0;"
+           onmouseenter="this.style.color='#fff';this.style.borderColor='rgba(255,255,255,0.4)';"
+           onmouseleave="this.style.color='rgba(255,255,255,0.55)';this.style.borderColor='rgba(255,255,255,0.18)';">
+          —
+        </button>
+      </div>
+    `;
+    // Wire minimize button after innerHTML is set
+    header.querySelector("#sora-minimize-btn").onclick = () => toggleMinimize();
+
+    // ── Tab bar ──
+    tabBarEl = document.createElement("div");
+    tabBarEl.style.cssText = `
+      display: flex; border-bottom: 1px solid rgba(255,255,255,0.1);
+      flex-shrink: 0; padding: 0 4px; overflow-x: auto;
+    `;
+
+    // ── Fetch action row (single contextual button + Stop) ──
+    // This row is rebuilt on each render() call to match the active tab.
+    const fetchRow = document.createElement("div");
+    fetchRow.id = "sora-fetch-row";
+    fetchRow.style.cssText = "display:flex;gap:7px;flex-wrap:wrap;padding:10px 14px 0;flex-shrink:0;align-items:center;";
+
+    btnFetchDrafts    = mkBtn("📥 Fetch Drafts Page",          () => doFetchDrafts());
+    btnFetchPublished = mkBtn("🌐 Fetch Profile Page",          () => doFetchPublished());
+    btnFetchChar      = mkBtn("🎭 Enter Username → Get Drafts", () => doFetchCameoDrafts());
+    btnFetchChar.id   = "sora-btn-fetch-char";
+    let btnFetchAppearances = mkBtn("🎭 Enter Username → Get Appearances", () => doFetchCameoAppearances());
+    btnFetchAppearances.id = "sora-btn-fetch-app";
+
+    btnCancel = mkBtn("⛔ Stop", () => {
+      state.cancel = true; setBusy("idle", "Stopping…");
+    }, "rgba(239,68,68,0.22)");
+    btnCancel.style.display = "none";
+
+    // All fetch buttons added — render() will show/hide the right one
+    let btnFetchLiked = mkBtn("♡ Fetch Liked", () => doFetchLiked());
+    btnFetchLiked.id = "sora-btn-fetch-liked";
+    btnFetchLiked.style.display = "none";
+
+    fetchRow.append(btnFetchDrafts, btnFetchPublished, btnFetchChar, btnFetchAppearances, btnFetchLiked, btnCancel);
+
+    // ── Fetch context hint ──
+    const hintEl = document.createElement("div");
+    hintEl.id = "sora-hint-el";
+    hintEl.style.cssText = "padding:5px 14px 0;font-size:10px;opacity:.4;flex-shrink:0;";
+    hintEl.textContent = "Click the button above to load videos into this tab";
+
+    // ── Download buttons row ──
+    const dlRow = document.createElement("div");
+    dlRow.style.cssText = "display:flex;gap:7px;flex-wrap:wrap;padding:8px 14px 0;flex-shrink:0;";
+
+    btnDlSelected = mkBtn("⬇ Download Selected",    () => startDownloads(false),       "rgba(52,211,153,0.15)");
+    btnDlAll      = mkBtn("⬇ Download All New",      () => startDownloads(true),        "rgba(52,211,153,0.25)");
+    btnDlForce    = mkBtn("⬇ Force Download All",    () => startDownloads(false, true), "rgba(251,146,60,0.22)");
+    btnDlForce.title = "Re-downloads ALL videos in this tab, even previously saved ones. Useful for building a complete folder per character.";
+
+    btnSelectToggle = mkBtn("☐ Deselect All", () => {
+      const tabKind = tabKindFor(activeTab);
+      const tabItems = [...catalog.values()].filter(v => v.kind === tabKind && v.tab === activeTab);
+      // If any are selected → deselect all; otherwise → select all non-downloaded
+      const anySelected = tabItems.some(v => v.selected);
+      tabItems.forEach(v => {
+        v.selected = anySelected ? false : !downloaded.has(v.id);
+      });
+      saveCatalog();
+      render();
+    });
+
+    btnClearTab = mkBtn("🗑 Clear Tab",
+      () => { if (confirm(`Clear ${activeTab} tab?`)) clearTab(activeTab); }
+    );
+
+    btnClearAllCache = mkBtn("💥 Clear All Cache",
+      () => clearAllCache(),
+      "rgba(239,68,68,0.18)"
+    );
+    btnClearAllCache.title = "Wipe entire catalog AND download history — resets everything to zero.";
+
+    btnRefreshUrls = mkBtn("🔄 Refresh URLs",
+      () => doManualRefreshUrls(),
+      "rgba(99,179,237,0.18)"
+    );
+    btnRefreshUrls.title = "Re-fetch fresh signed URLs for all videos in this tab (URLs expire — run this before downloading old entries).";
+
+    btnSetFolder = mkBtn("📁 Set Folder", () => doPickFolder(), "rgba(251,191,36,0.13)");
+    btnSetFolder.title = "Choose (or change) the destination folder for downloads. The chosen folder is remembered for this session.";
+
+    btnPause = mkBtn("⏸ Pause", () => togglePause(), "rgba(255,255,255,0.09)");
+    btnPause.id = "sora-btn-pause";
+    btnPause.style.display = "none";
+    btnPause.title = "Pause/resume the active download batch.";
+
+    dlRow.append(btnDlSelected, btnDlAll, btnDlForce, btnPause, btnSelectToggle, btnSetFolder, btnRefreshUrls, btnClearTab, btnClearAllCache);
+
+    // ── Workers + options row ──
+    const optRow = document.createElement("div");
+    optRow.style.cssText = "display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:6px 14px 0;flex-shrink:0;font-size:11px;";
+
+    // Workers slider
+    const wLabel = document.createElement("label");
+    wLabel.style.cssText = "display:flex;align-items:center;gap:7px;color:rgba(255,255,255,0.5);white-space:nowrap;";
+    const wSlider = document.createElement("input");
+    wSlider.type = "range"; wSlider.min = 1; wSlider.max = 6; wSlider.value = _workerCount;
+    wSlider.style.cssText = "width:70px;accent-color:#34d399;";
+    const wVal = document.createElement("span");
+    wVal.textContent = `${_workerCount}`;
+    wVal.style.cssText = "color:#34d399;font-weight:700;min-width:10px;";
+    wSlider.oninput = () => { _workerCount = parseInt(wSlider.value); wVal.textContent = _workerCount; };
+    wLabel.append("⚡ Workers:", wSlider, wVal);
+
+    // Skip-existing toggle
+    const skipLabel = document.createElement("label");
+    skipLabel.style.cssText = "display:flex;align-items:center;gap:5px;color:rgba(255,255,255,0.5);cursor:pointer;white-space:nowrap;";
+    const skipCb = document.createElement("input");
+    skipCb.type = "checkbox"; skipCb.checked = _skipExistingEnabled;
+    skipCb.style.accentColor = "#34d399";
+    skipCb.onchange = () => { _skipExistingEnabled = skipCb.checked; };
+    skipLabel.append(skipCb, "Skip existing");
+    skipLabel.title = "Scan the destination folder and skip files that are already there (>3 MB MP4).";
+
+    // Watermark toggle
+    const wmLabel = document.createElement("label");
+    wmLabel.style.cssText = "display:flex;align-items:center;gap:5px;color:rgba(255,255,255,0.5);cursor:pointer;white-space:nowrap;";
+    const wmCb = document.createElement("input");
+    wmCb.type = "checkbox"; wmCb.checked = _watermarkEnabled;
+    wmCb.style.accentColor = "#fbbf24";
+    wmCb.onchange = () => { _watermarkEnabled = wmCb.checked; };
+    wmLabel.append(wmCb, "Remove watermarks");
+    wmLabel.title = "Attempt to fetch watermark-free versions via soravdl.com proxy. Falls back to source if proxy fails.";
+
+    // JSON export button
+    const btnJson = mkBtn("📋 Export JSON", () => exportCatalogJSON(), "rgba(255,255,255,0.07)");
+    btnJson.title = "Export the current catalog to a JSON manifest file.";
+
+    // Update badge
+    const updateBadge = document.createElement("span");
+    updateBadge.id = "sora-update-badge";
+    updateBadge.style.cssText = "display:none;padding:2px 8px;border-radius:5px;background:rgba(251,191,36,0.15);color:#fbbf24;border:1px solid rgba(251,191,36,0.3);font-size:10px;font-weight:700;cursor:pointer;";
+    updateBadge.title = "A newer version is available on GitHub";
+    updateBadge.onclick = () => window.open(`https://github.com/${GITHUB_REPO}/releases`, "_blank");
+
+    optRow.append(wLabel, skipLabel, wmLabel, btnJson, updateBadge);
+
+    // ── Folder hint ──
+    const folderHint = document.createElement("div");
+    folderHint.id = "sora-folder-hint";
+    folderHint.style.cssText = "padding:4px 14px 0;font-size:10px;color:rgba(52,211,153,0.6);flex-shrink:0;";
+
+    // ── Status ──
+    statusDiv = document.createElement("div");
+    statusDiv.style.cssText = "padding:6px 14px 2px;color:#34d399;font-weight:600;min-height:18px;flex-shrink:0;font-size:11px;";
+
+    // ── Count bar ──
+    countDiv = document.createElement("div");
+    countDiv.style.cssText = "padding:0 14px 7px;color:rgba(255,255,255,0.45);font-size:11px;border-bottom:1px solid rgba(255,255,255,0.08);flex-shrink:0;";
+
+    // ── List ──
+    listDiv = document.createElement("div");
+    listDiv.style.cssText = "padding:8px 14px;overflow-y:auto;flex:1;";
+
+    // ── Diagnostic log ──
+    const diagToggleRow = document.createElement("div");
+    diagToggleRow.style.cssText = "display:flex;align-items:center;gap:7px;padding:6px 14px 0;flex-shrink:0;";
+
+    const diagToggleBtn = document.createElement("button");
+    diagToggleBtn.type = "button";
+    diagToggleBtn.textContent = "🔍 Hide Diagnostics";
+    diagToggleBtn.style.cssText = "padding:5px 10px;border-radius:7px;cursor:pointer;font-size:11px;font-family:system-ui,sans-serif;border:1px solid rgba(99,179,237,0.4);background:rgba(99,179,237,0.12);color:rgba(99,179,237,0.9);";
+
+    const diagCopyBtn = document.createElement("button");
+    diagCopyBtn.type = "button";
+    diagCopyBtn.textContent = "📋 Copy Log";
+    diagCopyBtn.style.cssText = "padding:5px 10px;border-radius:7px;cursor:pointer;font-size:11px;font-family:system-ui,sans-serif;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.09);color:#fff;";
+
+    diagToggleRow.append(diagToggleBtn, diagCopyBtn);
+
+    const diagWrap = document.createElement("div");
+    diagWrap.style.display = "block";
+
+    const diagLog = document.createElement("pre");
+    diagLog.id = "sora-diag-log";
+    diagLog.style.cssText = "margin:4px 14px 0;padding:7px 9px;background:rgba(0,0,0,0.55);border:1px solid rgba(255,255,255,0.09);border-radius:7px;font:9.5px/1.5 monospace;color:rgba(255,255,255,0.5);overflow-y:auto;max-height:150px;white-space:pre-wrap;word-break:break-all;flex-shrink:0;";
+    diagLog.textContent = "Diagnostics will appear here when you fetch or download.";
+    diagWrap.appendChild(diagLog);
+
+    diagToggleBtn.onclick = () => {
+      const show = diagWrap.style.display === "none";
+      diagWrap.style.display    = show ? "block" : "none";
+      diagCopyBtn.style.display = show ? "inline" : "none";
+      diagToggleBtn.textContent = show ? "🔍 Hide Diagnostics" : "🔍 Diagnostics";
+    };
+    diagCopyBtn.onclick = () => {
+      navigator.clipboard.writeText(diagLines.join("\n"))
+        .then(() => { diagCopyBtn.textContent = "✅ Copied!"; setTimeout(() => { diagCopyBtn.textContent = "📋 Copy Log"; }, 2000); })
+        .catch(() => { diagCopyBtn.textContent = "❌ Failed";  setTimeout(() => { diagCopyBtn.textContent = "📋 Copy Log"; }, 2000); });
+    };
+
+    // ── Panel body (everything below header — hidden when minimized) ──
+    const panelBody = document.createElement("div");
+    panelBody.id = "sora-panel-body";
+    panelBody.style.cssText = "display:flex;flex-direction:column;overflow:hidden;flex:1;min-height:0;";
+    panelBody.append(tabBarEl, fetchRow, hintEl, dlRow, optRow, folderHint, statusDiv, countDiv, diagToggleRow, diagWrap, listDiv);
+
+    panel.append(header, panelBody);
+    document.documentElement.appendChild(panel);
+
+    // Restore minimized state from previous session
+    try {
+      if (localStorage.getItem(STORE_MINIMIZED) === "1") {
+        _isMinimized = true;
+        const body = document.getElementById("sora-panel-body");
+        if (body) body.style.display = "none";
+        panel.style.maxHeight = "none";
+        panel.style.height    = "auto";
+        const btn = document.getElementById("sora-minimize-btn");
+        if (btn) { btn.textContent = "□"; btn.title = "Restore panel"; }
+      }
+    } catch {}
+
+    // Show username
+    setTimeout(async () => {
+      const tok = await getToken();
+      if (tok) await loadMyProfile();
+      const el = document.getElementById("sora-v50-user");
+      if (el) el.textContent = `@${myUsername || "unknown"}`;
+    }, 600);
+
+    renderTabs();
+  }
+
+  function render() {
+    if (!panel) return;
+
+    renderTabs();
+
+    // Show only the fetch button relevant to the active tab
+    const _allFetchBtns = [btnFetchDrafts, btnFetchPublished,
+      document.getElementById("sora-btn-fetch-char"),
+      document.getElementById("sora-btn-fetch-app"),
+      document.getElementById("sora-btn-fetch-liked")];
+    _allFetchBtns.forEach(b => { if (b) b.style.display = "none"; });
+    if (activeTab === "drafts")            { if (btnFetchDrafts)    btnFetchDrafts.style.display    = "inline-block"; }
+    if (activeTab === "profile")           { if (btnFetchPublished) btnFetchPublished.style.display = "inline-block"; }
+    if (activeTab === "cameo-drafts")      { const b = document.getElementById("sora-btn-fetch-char"); if (b) b.style.display = "inline-block"; }
+    if (activeTab === "cameo-appearances") { const b = document.getElementById("sora-btn-fetch-app"); if (b) b.style.display = "inline-block"; }
+    if (activeTab === "liked")             { const b = document.getElementById("sora-btn-fetch-liked"); if (b) b.style.display = "inline-block"; }
+
+    // Update hint text
+    const hintElDyn = document.getElementById("sora-hint-el");
+    if (hintElDyn) {
+      const hints = {
+        "drafts":            "/profile/x/drafts → Fetch Drafts Page",
+        "profile":           "/profile/x → Fetch Profile Page",
+        "cameo-drafts":      "Type a character username to fetch their drafts",
+        "cameo-appearances": "Type a character username to fetch their published appearances",
+        "liked":              "Fetch your liked videos from the V2 feed",
+      };
+      hintElDyn.textContent = hints[activeTab] || "";
+    }
+
+    // Update select-toggle label based on current selection state
+    if (btnSelectToggle) {
+      const tabKind2 = tabKindFor(activeTab);
+      const anySelected2 = [...catalog.values()].some(v => v.kind === tabKind2 && v.tab === activeTab && v.selected);
+      btnSelectToggle.textContent = anySelected2 ? "☐ Deselect All" : "☑ Select All";
+    }
+
+    // Update folder hint (dynamic — shows set folder or default prompt)
+    updateFolderHintUI();
+
+    const tabKind  = tabKindFor(activeTab);
+    const items    = [...catalog.values()]
+      .filter(e => e.kind === tabKind && e.tab === activeTab)
+      .sort((a, b) => ((b.created_at || b.posted_at || 0) - (a.created_at || a.posted_at || 0)));
+
+    const selected = items.filter(i => i.selected).length;
+    const newVids  = items.filter(i => !downloaded.has(i.id)).length;
+
+    // Group by character for count display
+    const byChar = {};
+    items.forEach(it => {
+      const c = it.character || "unknown";
+      byChar[c] = (byChar[c] || 0) + 1;
+    });
+    const charSummary = Object.entries(byChar)
+      .map(([c, n]) => `@${c}:${n}`)
+      .join("  ");
+
+    countDiv.textContent =
+      `${items.length} ${activeTab.replace("-", " ")} | New: ${newVids} | Sel: ${selected} | Saved: ${downloaded.size}` +
+      (charSummary ? `  [${charSummary}]` : "");
+
+    listDiv.innerHTML = "";
+
+    if (!items.length) {
+      const emptyMsgs = {
+        "drafts":            `No drafts yet. Go to <strong>/profile/x/drafts</strong> and click <em>Fetch Drafts Page</em>.`,
+        "profile":           `No profile videos yet. Go to <strong>/profile/x</strong> and click <em>Fetch Profile Page</em>.`,
+        "cameo-drafts":      `No cameo drafts yet. Click <em>Enter Username → Get Drafts</em> above.`,
+        "cameo-appearances": `No cameo appearances yet. Click <em>Enter Username → Get Appearances</em> above.`,
+        "liked":              `No liked videos yet. Switch to the <strong>Liked</strong> tab and click <em>♡ Fetch Liked</em>.`,
+      };
+      const msg = emptyMsgs[activeTab] || "No videos yet.";
+      listDiv.innerHTML = `<div style="opacity:.6;padding:10px 0;font-size:12px;line-height:1.8;">${msg}</div>`;
+      return;
+    }
+
+    const badge = (t, r, g, b) =>
+      `<span style="display:inline-block;margin-left:4px;padding:1px 5px;border-radius:5px;
+       font-size:10px;font-weight:700;background:rgba(${r},${g},${b},0.18);
+       color:rgba(${r},${g},${b},1);border:1px solid rgba(${r},${g},${b},0.3);">${t}</span>`;
+
+    // Group items by character, show character header rows
+    let lastChar = null;
+
+    for (const it of items) {
+      const char = it.character || "unknown";
+
+      // Character separator
+      if (char !== lastChar) {
+        lastChar = char;
+        const sep = document.createElement("div");
+        sep.style.cssText = `
+          padding: 6px 0 3px; font-size: 11px; font-weight: 700;
+          color: rgba(255,255,255,0.35); letter-spacing: .04em;
+          border-top: ${items.indexOf(it) > 0 ? "1px solid rgba(255,255,255,0.06)" : "none"};
+          margin-top: ${items.indexOf(it) > 0 ? "4px" : "0"};
+        `;
+        sep.textContent = `@${char}`;
+        listDiv.appendChild(sep);
+      }
+
+      const isDl = downloaded.has(it.id);
+      const row  = document.createElement("div");
+      row.style.cssText = `
+        display:flex;gap:8px;padding:6px 0;
+        border-bottom:1px dashed rgba(255,255,255,0.07);
+        align-items:start;opacity:${isDl && !it.selected ? "0.38" : "1"};
+        transition: opacity 0.15s;
+      `;
+
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      // Downloaded items start unchecked but are NOT disabled — user can re-check to re-download
+      cb.checked = !!it.selected;
+      cb.title   = isDl ? "Previously downloaded — check to re-download" : "";
+      cb.onchange = () => {
+        it.selected = cb.checked;
+        // Live-update row opacity so feedback is instant
+        row.style.opacity = (downloaded.has(it.id) && !cb.checked) ? "0.38" : "1";
+        saveCatalog();
+        renderTabs(); // update tab new-count
+      };
+
+      const meta = document.createElement("div");
+      meta.style.cssText = "flex:1;min-width:0;";
+      meta.innerHTML = `
+        <div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:11.5px;">
+          ${it.filename || "video.mp4"}
+          ${badge("SRC", 52, 211, 153)}
+          ${it.kind === "post" ? badge("PUB", 251, 191, 36) : ""}
+          ${(it.prompt || it.postText) ? badge("TXT", 99, 179, 237) : ""}
+          ${isDl ? badge("✓", 150, 150, 150) : ""}
+        </div>
+        <div style="opacity:.5;font-size:10.5px;margin-top:2px;">
+          ${it.size ? formatBytes(it.size) : ""}
+          ${it.duration_s ? ` · ${it.duration_s}s` : ""}
+          ${it.width && it.height ? ` · ${it.width}×${it.height}` : ""}
+          ${(it.created_at || it.posted_at)
+            ? ` · ${new Date((it.created_at || it.posted_at) * 1000).toLocaleDateString()}` : ""}
+        </div>
+        ${(it.prompt || it.postText) ? `
+        <div style="opacity:.38;font-size:10px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+          📝 ${(it.prompt || it.postText).slice(0, 95)}…
+        </div>` : ""}
+      `;
+
+      row.append(cb, meta);
+      listDiv.appendChild(row);
+    }
+  }
+
+  /**********************
+   * JSON Catalog Export
+   **********************/
+  async function exportCatalogJSON() {
+    const items = [...catalog.values()];
+    const payload = {
+      script_version: VERSION,
+      exported_at:    new Date().toISOString(),
+      total:          items.length,
+      downloaded:     downloaded.size,
+      items,
+    };
+    const json     = JSON.stringify(payload, null, 2);
+    const filename = `sora_catalog_${new Date().toISOString().slice(0,10)}.json`;
+    const blob     = new Blob([json], { type: "application/json;charset=utf-8" });
+
+    if (_fsBase) {
+      try {
+        const fh = await _fsBase.getFileHandle(filename, { create: true });
+        const w  = await fh.createWritable();
+        await w.write(blob); await w.close();
+        setBusy("idle", `📋 JSON exported: ${filename}`);
+        return;
+      } catch {}
+    }
+    // Fallback: GM_download
+    const url = URL.createObjectURL(blob);
+    GM_download({ url, name: filename, saveAs: true,
+      onload: () => URL.revokeObjectURL(url),
+      onerror: () => URL.revokeObjectURL(url),
+    });
+    setBusy("idle", `📋 JSON exported: ${filename}`);
+  }
+
+  /**********************
+   * Menu Commands
+   **********************/
+  function installMenu() {
+    try {
+      GM_registerMenuCommand("Sora: Fetch Drafts Page",             () => doFetchDrafts());
+      GM_registerMenuCommand("Sora: Fetch Profile Page",            () => doFetchPublished());
+      GM_registerMenuCommand("Sora: Cameo Drafts…",                 () => doFetchCameoDrafts());
+      GM_registerMenuCommand("Sora: Cameo Appearances…",            () => doFetchCameoAppearances());
+      GM_registerMenuCommand("Sora: Download All New",              () => startDownloads(true));
+      GM_registerMenuCommand("Sora: Force Download All (re-download)", () => startDownloads(false, true));
+      GM_registerMenuCommand("Sora: Clear Current Tab",             () => clearTab(activeTab));
+      GM_registerMenuCommand("Sora: Clear ALL Cache (full reset)",  () => clearAllCache());
+      GM_registerMenuCommand("Sora: Refresh URLs (current tab)",    () => doManualRefreshUrls());
+      GM_registerMenuCommand("Sora: Set Download Folder",              () => doPickFolder());
+      GM_registerMenuCommand("Sora: Fetch Liked Videos",                () => doFetchLiked());
+      GM_registerMenuCommand("Sora: Export JSON Catalog",               () => exportCatalogJSON());
+      GM_registerMenuCommand("Sora: Toggle Watermark Removal",          () => { _watermarkEnabled = !_watermarkEnabled; setBusy("idle", `Watermark removal: ${_watermarkEnabled ? "ON" : "OFF"}`); });
+      GM_registerMenuCommand("Sora: Minimize / Restore Panel",             () => toggleMinimize());
+    } catch {}
+  }
+
+  /**********************
+   * Boot
+   **********************/
+  function boot() {
+    loadCatalog();
+    loadDownloaded();
+    makePanel();
+    render();
+    installMenu();
+    setBusy("idle", "Ready.");
+    diag("info", `Sora2 MP4 Batch Downloader v${VERSION} ready`);
+    setTimeout(checkForUpdate, 2000);
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot, { once: true });
+  } else {
+    boot();
+  }
+
+})();
