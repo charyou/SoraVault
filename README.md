@@ -1,9 +1,11 @@
-# <sub><img src="assets/soravault-logo-square.png" height="35"></sub> SoraVault 2.6 – Bulk Export & Backup Tool for OpenAI Sora
+# <sub><img src="assets/soravault-logo-square.png" height="35"></sub> SoraVault 2.7 - Bulk Export & Backup Tool for OpenAI Sora
 
 **Your Sora library is about to disappear. Vault it.**
- 
-Sora is shutting down. OpenAI hasn't released an export tool yet.
-SoraVault is a free, API-driven tool to bulk export your OpenAI Sora library. Easily download Sora videos, backup your generated images, save liked content, and extract all original text prompts in minutes, not hours.
+
+SoraVault is a free, local-first, API-driven tool to bulk export your OpenAI
+Sora library. It backs up Sora 1 images, Sora 2 videos, drafts, liked content,
+cameos, character content, creator libraries, prompts, and metadata without
+waiting for a platform export.
 
 > "We'll share more soon, including timelines for the app and API
 > and details on preserving your work." - OpenAI, March 24, 2026
@@ -12,277 +14,363 @@ SoraVault is a free, API-driven tool to bulk export your OpenAI Sora library. Ea
 
 ---
 
-## 🆕 New in 2.7 (preview) — Characters & Creator Backup
+## New in 2.7
 
-**Back up any public creator's library — and your own characters — in bulk.**
-Two new scan sources land in 2.7 as a preview: **My Characters** backs up your own character profiles, and the new **Creator** tile lets you type any creator username and fetch their entire published library (plus their characters, optionally).
+<img src="assets/new-features.gif" alt="SoraVault 2.7 redesigned first screen with Creator Backup and Mirror Mode" width="720">
 
-> **Preview note:** These features are functional but have rough edges. See the [limitations section below](#-creator-content-27-preview) before using on large creator libraries.
+SoraVault 2.7 redesigns the first screen around exclusive backup modes:
 
-[Jump to Creator Content details →](#-creator-content-27-preview)
-
----
-
-## 🆕 New in 2.6 — Mirror mode (beta)
-
-<img src="assets/feature_mirrormode.png" alt="SoraVault Mirror mode — passive capture while you browse Sora" width="720">
-
-**Just browse Sora normally — SoraVault captures everything you scroll past.**
-Mirror mode runs quietly in the background: open Explore, a creator's profile,
-your own drafts, or any post, and files land on disk in folders that mirror
-where you found them (`mirror_browse/sora2_explore/`, `mirror_browse/sora2_profile/charju/`, …).
-No scans, no waiting, no re-downloads. Turn it on, start scrolling, walk away.
-
-[Jump to Mirror mode details →](#-mirror-mode-beta--new-in-26)
+- **Regular Backup** - the main path for backing up your own Sora 1 and Sora 2
+  content.
+- **Creator Backup** - back up public Sora 2 creators by username, including
+  their characters when enabled.
+- **Mirror Mode** - browse Sora normally and capture matching content in the
+  background.
+- **Likes range filter** - filter Regular Backup and Creator Backup results by
+  minimum and maximum like count before downloading.
+- **Cleaner startup UX** - modes cannot be combined accidentally. Creator Backup
+  no longer requires a regular source checkbox just to unlock Start Scan.
 
 ---
 
-## ⚡ What makes SoraVault different
+## See It In Action
 
-| Feature | SoraVault 2.7 Preview | OpenAI Official Export | Manual Download | Other Tools |
-|---------|-----------|------------------------|-----------------|-------------|
-| FREE | ✅ | ✅ | ✅ | ❌ (only limited) |
-| Videos (Sora v2 — Profile) | ✅ | ✅ (mixed with all ChatGPT data) | ❌ (one by one) | ❌ |
-| Videos (Sora v2 — Draft) | ✅ | ❌ | ❌ (one by one) | ❌ |
-| Images (Sora v1) | ✅ | ✅ (mixed with all ChatGPT data) | ❌ (one by one) | Partial |
-| Liked Content (v1 & v2) | ✅ | ❌ | ❌ | ❌ |
-| Cameos & Cameo Drafts (Sora v2) | ✅ | ❌ | ❌ | ❌ |
-| **Mirror mode — passive capture while browsing** | ✅ | ❌ | ❌ | ❌ |
-| **My Characters backup** | ✅ **Preview** | ❌ | ❌ | ❌ |
-| **Creator library backup (by username)** | ✅ **Preview** | ❌ | ❌ | ❌ |
-| Original quality (full-res renders) | ✅ | ✅ | ✅ | ❌ (compressed) |
-| **Watermark-free downloads** ¹ | ✅ | ❌ | ❌ | ❌ |
-| Prompt saved as .txt sidecar | ✅ | ❌ | ❌ | ❌ |
-| Raw JSON metadata export | ✅ | ❌ | ❌ | ❌ |
-| Bulk download (entire library) | ✅ | ✅ (one ZIP, no filters) | ❌ | Partial |
-| Smart filters (source, author, ratio, quality, date, favorites) | ✅ | ❌ | ❌ | ❌ |
-| Instant — no waiting period | ✅ | ❌ (days of waiting) | ✅ | ❌ |
-| No link expiry | ✅ | ❌ (link expires in 24h) | ✅ | — |
-| API-Driven (No page scrolling required) | ✅ | — | — | ❌ |
-| Parallel downloads (up to 8x speed) | ✅ | ❌ | ❌ | ❌ |
-| Granular auto-folder sorting | ✅ | ❌ | ❌ | ❌ |
-| Only Export your Favorites (v1) | ✅ | ❌ | ❌ | ❌ |
+[![SoraVault - Bulk exporting OpenAI Sora videos](assets/videothumbnail.png)](https://youtu.be/yEtdvpIedq4)
 
-¹ Via soravdl.com (third-party proxy — availability not guaranteed). Disabled by default; enable in export settings.
+*1 minute. No fluff. Just the tool doing the work.*
 
 ---
 
-## 🎬 See it in action
+## Quick Start
 
-[![SoraVault - Bulk exporting OpenAI Sora videos](assets/videothumbnail.png)](https://youtu.be/IK6nezdehF4)
+### Option A: Chrome / Edge Extension (recommended)
 
-*1 minute. No fluff. Just the tool doing its thing.*
+[Download SoraVault - Chrome Extension (latest)](https://github.com/charyou/SoraVault/releases/latest/download/SoraVault-chrome.zip)
 
-🎵 *Soundtrack: PULLING by Bastian RENN — [Upcoming on Spotify]*
+1. Download the zip and unpack it to any folder.
+2. In Chrome/Edge, open the extensions page and enable Developer mode.
+3. Click **Load unpacked**.
+4. Select the folder where you unpacked the extension.
+5. Open [sora.chatgpt.com](https://sora.chatgpt.com).
+6. Use the SoraVault panel: choose a mode, scan or start Mirror, filter, then
+   download.
 
----
+### Option B: Tampermonkey Script
 
-## 🚀 Quick Start
+1. Install [Tampermonkey](https://tampermonkey.net).
+2. Download the [latest SoraVault userscript](https://github.com/charyou/SoraVault/releases/latest/download/SoraVault.user.js).
+   Tampermonkey should detect it and prompt you to install.
+3. Open [sora.chatgpt.com](https://sora.chatgpt.com).
+4. Use the SoraVault panel on the page.
 
-### Option A: Chrome / Edge Extension (for installation in dev mode, more convenient - RECOMMENDED)
-
-[⬇ Download SoraVault — Chrome Extension (latest)](https://github.com/charyou/SoraVault/releases/latest/download/SoraVault-chrome.zip)
-
-1. Download the zip and unpack it to any folder
-2. In Chrome/Edge, go to your extension tab, activate developer mode (it's a small toggle switch, usually located in the top right corner).
-3. Click the "Load unpacked" button that has now appeared at the top left of the page.
-4. Browse to and select the folder where you unzipped the extension files in Step 1.
-5. The SoraVault 2 extension should now appear in your list of installed extensions and is ready to use! Never delete that folder while in use.
-6. For any future updates, just export the new zip to the same folder, go back to your extension tab, scroll down to SoraVault and press "Reload script"
-   
-<img src="assets/sora-app.png" height="565">
-
-
-### Option A: Tampermonkey Script 
-
-1. Install [Tampermonkey](https://tampermonkey.net) for your browser. 
-> **What is Tampermonkey and is it safe?** > Tampermonkey is a highly trusted browser extension with over 10 million users on the official Chrome and Firefox web stores. It acts as a safe manager that lets you run custom, open-source code on specific websites. It is completely safe—you can read every line of SoraVault's code before installing it, and the script is strictly sandboxed to only run on `sora.chatgpt.com`.
-> In your extension tab: Be sure to enable "developer mode", go to details of Tampermonkey and enable "allow user scripts"
-2. Download the [latest SoraVault userscript](https://github.com/charyou/SoraVault/releases/latest/download/SoraVault.user.js) — Tampermonkey will auto-detect it and prompt to install. *(If it doesn't, drag & drop the downloaded `.user.js` file into your browser.)*
-3. Go to [sora.chatgpt.com](https://sora.chatgpt.com).
-4. Use the SoraVault panel on the page: **Scan** → **Filter** (optional) → **Download**.
-
+Tampermonkey is a widely used user-script manager. SoraVault runs only on
+`sora.chatgpt.com`, is open source, and keeps all work local in your browser.
 
 ---
 
-## 🔍 Features in Detail
+## Feature Priorities
 
-### 📡 Mirror mode (beta) — new in 2.6
+| Priority | Feature | What SoraVault does |
+|----------|---------|---------------------|
+| 1 | **Regular Backup** | Backs up your own Sora 1 library, Sora 1 likes, Sora 2 profile videos, drafts, liked videos, cameos, cameo drafts, and your own character content. |
+| 2 | **Highest-quality files + prompts** | Downloads original media where available, often higher quality than what manual UI downloads expose, and can save `.txt` prompt sidecars plus raw `.json` metadata. |
+| 3 | **Watermark removal** | Optional watermark-free Sora 2 downloads for supported video sources through `soravdl.com`. This is a third-party proxy and availability is not guaranteed. |
+| 4 | **Filters before download** | Filter by source, prompt text, author exclusion, aspect ratio, quality, operation, date, first/last N, favorites, and likes range. |
+| 5 | **Creator Backup** | Fetch public Sora 2 creators by username, optionally including their characters and appearances. |
+| 6 | **Mirror Mode** | Capture what you browse in the background with like and keyword filters, saved into a `mirror_browse/` folder. |
+| 7 | **Resume-friendly downloads** | Skip existing files by ID and minimum size checks, so re-runs fill only what is missing. |
+| 8 | **Local-first workflow** | No SoraVault account, no cloud service, no analytics, no server-side storage. |
 
-<img src="assets/feature_mirrormode.png" alt="SoraVault Mirror mode panel — toggle, folder picker, like/keyword filters" width="560">
+---
 
-A brand-new way to build your library: instead of running a scan and waiting,
-just **browse Sora normally** and SoraVault quietly captures everything you
-scroll past and downloads it in the background with 4 parallel workers.
+## Feature Details
 
-**What it does**
-- Watches every Sora API response as you browse — no extra requests, no scanning.
-- Saves files as you go, organised by where you found them: `mirror_browse/sora2_explore/`,
-  `mirror_browse/sora2_profile/{creator}/`, `mirror_browse/sora1_library/`, and so on.
-- Single-post pages (`/p/{id}`) land in the author's folder when SoraVault knows the author.
-- Keeps an append-only `mirror_manifest.json` so re-enabling later never re-downloads
-  anything already on disk.
-- Optional `.txt` prompt sidecar next to each media file (on by default).
+### Regular Backup
 
-**Filters** — capture only what you want:
-- **Min likes** — e.g. only save posts with 1,000+ likes.
-- **Include keywords** — comma-separated; matches anywhere in the prompt.
-- **Exclude keywords** — comma-separated; blocks matches.
+Regular Backup is the primary SoraVault workflow. It scans selected Sora sources,
+builds a local result list, lets you filter that list, then downloads exactly
+what you choose.
 
-**How to use it**
-1. Open the SoraVault panel on Sora. You'll see two sections: **Backup** (the
-   classic scan + download flow) and **Mirror (beta)**.
-2. In the Mirror tile, click **📂 Pick folder…** and choose where captures
-   should land. SoraVault creates a `mirror_browse/` subfolder inside it.
-3. (Optional) Set a min-likes threshold and/or include/exclude keywords.
-4. Flip the Mirror toggle on. The badge shows live status
-   (`📡 N captured · M queued` / `📡 N saved`).
-5. Browse Sora as you normally would — Explore, creator profiles, your own
-   drafts, liked feed, single posts. Files download in the background.
-6. Minimise the panel if you like — a small pulsing **📡** stays in the header
-   so you know capture is still running.
+Supported regular backup sources:
 
-**Known limitations**
-- If the Sora tab fully reloads, Mirror stops (state lives in the page).
-  A reload-resume flow is planned for the next release.
-- Watermark removal is intentionally skipped in Mirror mode. If you need
-  watermark-free MP4s, use the regular Backup flow with watermark removal on.
+- **Sora 1 Library** - your generated image library.
+- **Sora 1 Likes** - liked Sora 1 content, which the official export does not
+  give you as a clean Sora-only collection.
+- **Sora 2 Videos** - your published profile posts.
+- **Sora 2 Drafts** - unpublished generated drafts. These are the files most
+  people cannot get from OpenAI's general account export.
+- **Sora 2 Liked** - liked Sora 2 videos from other creators, without clicking
+  through one item at a time.
+- **Sora 2 Cameos** - public posts featuring you.
+- **Sora 2 Cameo Drafts** - private draft posts featuring you.
+- **Characters** - your own character posts and appearances.
 
-### 👤 Creator Content (2.7 Preview)
-
-Two new scan sources that ship as an opt-in preview. Both appear in the Backup panel — **My Characters** as an off-by-default checkbox, **Creator Backup** as a chip-input tile below Mirror.
-
-**My Characters** — lists all your character profiles, then for each character fetches published posts, cameo appearances, and probes for draft content. Files land in `sora_v2_characters/{character_name}/`.
-
-**Creator Backup** — type one or more creator usernames (comma-separated) into the chip input. Each chip is validated live against the API (green = found, with post and character counts; red = not found). SoraVault fetches their full published library, and optionally their characters' content too. Files land in `sora_v2_creators/{creator}/[characters/{character}/]`. Valid creators can be persisted across sessions via the "Remember" checkbox.
-
-**Known limitations**
-
-- **Scan sources must overlap.** The Scan button only activates when at least one of your own scan sources (Profile, Liked, etc.) is also checked. You don't have to download from them — just leave one ticked.
-- **Always fetches all characters.** If "Include characters" is on, SoraVault fetches every character of every creator regardless of how many posts they have. For large creator libraries this can take a long time. If you only want a creator's recent or popular posts, use **Mirror mode** instead: browse to their profile and SoraVault captures everything you scroll past — including your min-likes and keyword filters.
-- **Use the URL username, not the display name.** The username to enter is the one that appears in the creator's Sora profile URL (e.g. `charju` from `sora.chatgpt.com/profile/charju`), not the display name shown on their page. These can differ.
-- **My Characters workaround for zero-post characters.** If your character backup comes back empty, try adding yourself to the Creator Backup tile instead — it will capture all your public posts at minimum. This is a workaround; character backup hasn't been fully testable yet because the original developer's only character has no published posts.
-
-### Full Library Support
-- **Sora v2 Videos** — Profile videos AND Draft videos, full resolution.
-- **Sora v1 Images** — Your complete image library from classic Sora.
-- **Liked Content** — Backup your favorite videos and images from other creators (v1 and v2).
-- **Cameos & Cameo Drafts** — Videos where you appear as a cameo (public) and private cameo draft posts. New in v2.5.
-- **Export Formats** — Toggle between saving media, prompt `.txt` sidecars, and raw `.json` payload metadata.
-
-### Intelligent Data Capture
-- **API-Driven Architecture** — Operates entirely via API interception and background calls. No more clunky auto-scrolling or relying on page elements.
-- **Independent Pipelines** — Manage scanning sources independently (v1 library, v1 liked, v2 profile, v2 drafts, v2 liked, v2 cameos, v2 cameo drafts).
-- **Skip Errors** — Automatically detects and skips items flagged as `sora_error` or `sora_content_violation`.
-- **Hardcoded Auth (Optional)** — Advanced users can hardcode their `BEARER_TOKEN` in the config to bypass manual interception.
-
-### Granular Filter Engine
-- 🗂️ **Category filter** — filter by source (Profile, Liked, Cameos, Drafts…) before downloading. New in v2.5.
-- ⭐ **Favorites filter** — export only the items you've starred within your own v1 library, without pulling your entire collection. New in v2.5.
-- 🔎 Live full-text search across all prompts
-- 🚫 **Author Exclusion** — Easily filter out specific creators when backing up your "Liked" feed. For example, yourself.
-- 📐 Aspect ratio chips (16:9, 9:16, 1:1, etc.)
-- 🖼️ Quality filter (1080p, original renders)
-- 🎨 Operation filter (generate / extend / edit)
-- 📅 Date range picker
-- 🔢 Index range (e.g., items 10–50 only)
+Regular Backup is API-driven. It does not depend on scrolling the page to find
+your own library.
 
 ### Archive-Grade Downloads
-- **Original source files** from OpenAI servers (not preview thumbnails)
-- **Watermark-free downloads** — Profile and Liked videos can be fetched via the soravdl.com third-party proxy, removing the Sora watermark automatically. Adds ~5–6s per video. Disabled by default; enable in export settings. Auto-disables on persistent failure and falls back to direct download. Availability depends on soravdl.com uptime. New in v2.5.
-- **Granular Auto-Sorting** — Content is automatically sorted into smart subfolders: `sora_v1_images`, `sora_v1_videos`, `sora_v1_liked`, `sora_v2_profile`, `sora_v2_drafts`, `sora_v2_liked`, `sora_v2_cameos`, `sora_v2_cameo_drafts`.
-- **Smart naming** — `{date}_{prompt}_{genId}` with auto-truncation
-- **Custom output folder** via File System Access API (one permission, zero popups)
 
-### Performance
-- Up to 8 parallel downloads (Standard / Faster / Very fast presets)
-- Live activity status line — see what each worker is doing in real time. New in v2.5.
-- Built-in rate-limit protection
-- Visual progress bar + detailed log
-- Safe abort at any time
+- Saves full media files from OpenAI/Sora URLs instead of browser thumbnails or
+  compressed previews.
+- Prioritizes highest-quality source URLs where the API exposes them. This also
+  applies to creator content, where manual downloads often surface lower-quality
+  or less convenient files.
+- Optional `.txt` sidecar with prompt and useful metadata.
+- Optional raw `.json` manifest for audit/archive use.
+- Smart default filenames: `{genId}_{date}_{prompt}`.
+- Auto-sorted folders such as `sora_v2_profile`, `sora_v2_drafts`,
+  `sora_v2_liked`, `sora_v2_creators/{name}/`, and `mirror_browse/...`.
+- Skip-existing support for safe re-runs.
+- Pause, resume, stop, progress, ETA, and live worker activity.
+
+### Watermark Removal
+
+Watermark removal is optional and disabled by default. When enabled, supported
+Sora 2 video downloads can be fetched through `soravdl.com` to remove the Sora
+watermark.
+
+Important disclaimer:
+
+- `soravdl.com` is a third-party proxy and is not affiliated with SoraVault.
+- Availability, rate limits, and response quality are not guaranteed.
+- SoraVault automatically falls back to direct OpenAI/Sora downloads if the
+  proxy fails repeatedly or times out.
+- Watermark removal is intentionally not used by Mirror Mode.
+
+### Filters
+
+SoraVault lets you narrow scanned results before download:
+
+- Source/category.
+- Prompt keyword search.
+- Author exclusion for liked content.
+- Aspect ratio.
+- Quality.
+- Operation.
+- Date range.
+- First or last N items.
+- Favorites-only for Sora 1 library.
+- Minimum and maximum likes.
+
+When a likes range is active, items without a known like count are excluded so
+the final selection matches the range intentionally.
+
+### Creator Backup
+
+Creator Backup is for public Sora 2 creators.
+
+Add one or more creator usernames, or paste profile URLs. Each creator chip is
+validated live against the Sora API. Valid creators can be remembered across
+reloads by default.
+
+Creator Backup can download:
+
+- The creator's public posts.
+- Their characters' posts.
+- Their characters' cameo appearances.
+
+Files are stored under:
+
+```text
+sora_v2_creators/{creator}/
+sora_v2_creators/{creator}/characters/{character}/
+```
+
+Creator Backup requires Sora 2 access. If Sora 2 is geo-blocked, use Regular
+Backup for Sora 1 sources or Mirror Mode for whatever content you can browse.
+
+### Mirror Mode
+
+Mirror Mode is a passive capture mode. Instead of scanning a fixed endpoint,
+turn it on and browse Sora normally. SoraVault watches Sora API responses,
+captures downloadable items that pass your filters, and saves them in the
+background.
+
+Mirror Mode supports:
+
+- Sora 1 and Sora 2 browsing flows.
+- Explore pages.
+- Creator profiles.
+- Drafts and liked feeds when visible to you.
+- Single-post pages.
+- Minimum likes.
+- Include keywords.
+- Exclude keywords.
+- Optional prompt `.txt` sidecars.
+- Append-only `mirror_manifest.json` to avoid re-downloading saved items.
+
+Files are saved into folders that mirror where content was found, for example:
+
+```text
+mirror_browse/sora2_explore/
+mirror_browse/sora2_profile/{creator}/
+mirror_browse/sora1_library/
+```
+
+Known limitation: Mirror Mode state lives in the current Sora page. If the tab
+fully reloads, start Mirror Mode again.
 
 ---
 
-## 🛡️ Privacy & Security
+## How SoraVault Compares
 
-- **100% local** — no data leaves your browser
-- **No accounts** — no login, no tracking, no analytics
-- **Source available** — read every line of code yourself
+OpenAI's official export is useful as a general account archive, but it is not a
+focused Sora backup workflow. It mixes Sora files into a full ChatGPT export,
+does not expose several Sora-only collections, and gives you no pre-download
+filters. Manual download is fine for one favorite video, but it breaks down as
+soon as you need drafts, liked content, creator libraries, prompts, metadata, or
+hundreds of files.
 
----
-
-## 💬 Frequently Asked Questions (FAQ)
-
-**Q: How do I backup my unpublished Sora drafts?**
-A: You can backup your Sora drafts using SoraVault. While OpenAI’s official data export currently only includes published profile videos, SoraVault connects directly to your v2 drafts pipeline via API and downloads them in full resolution, along with their text prompts.
-
-**Q: Can't I just use OpenAI's official ChatGPT data export?**
-A: Yes, but it has severe limitations for video creators. The official export (Settings → Data Controls → Export) bundles your Sora content with all ChatGPT text conversations, takes days to process, the link expires in 24 hours, it strips out prompt metadata, and **crucially, it does not export your v2 Drafts**. SoraVault solves this by running instantly and sorting your media into dedicated folders.
-
-**Q: How to export Sora videos in their original, uncompressed resolution?**
-A: Simply run SoraVault and leave the "Quality" filter on its default setting. The tool automatically fetches the raw, uncompressed `.mp4` files directly from OpenAI's CDN servers, bypassing the compressed preview thumbnails shown on the web interface.
-
-**Q: Is there a way to download my "Liked" videos from other creators?**
-A: Yes! SoraVault 2.0 introduced a dedicated "Liked Content" scanner. It will automatically comb through both your v1 Favorites and v2 Liked feeds, allowing you to save videos generated by other creators to your local drive before the platform shuts down.
-
-**Q: Is SoraVault a web scraper or an API downloader?**
-A: SoraVault is a fully API-driven downloader. Version 2.0 replaced legacy screen-scraping with direct API interception. This means it doesn't need to manually scroll your page; it communicates directly with OpenAI's backend, making it up to 5x faster and significantly more reliable.
-
-**Q: Is it safe to use? Is this legal?**
-A: Yes and yes. You are only downloading your own generated content and data you are already authorized to access while logged into your own account. SoraVault is 100% open-source, runs entirely locally in your browser via Tampermonkey, and sends zero data to third parties.
-
-**Q: Will this tool still work after OpenAI shuts down Sora?**
-A: No. SoraVault relies on reading data directly from Sora's live servers. Once the servers are taken offline, this tool will stop working. **You must run your backup before the official shutdown date.**
-
-**Q: I have 500+ files. How long does it take?**
-A: Because v2.0 is fully API-driven, it takes only under 2 minutes to scan your library. With default settings (2 parallel downloads), expect ~10 minutes for the download phase. With watermark removal enabled, add ~5–6s per eligible video. Depends on connection speed.
-
-**Q: Why Tampermonkey and not a browser extension?**
-A: Tampermonkey is actually easier to install and use than sideloading a CRX extension (which requires Developer Mode and shows browser warnings). One click to install, auto-updates, zero nag screens.
-
-**Q: Why does watermark removal add time to my download?**
-A: Watermark-free downloads are fetched through soravdl.com, a third-party proxy not affiliated with SoraVault. It takes 5–6 seconds per video and its availability is not guaranteed. For large libraries, the time estimate badge in the UI shows the extra time before you start. The feature is disabled by default — enable it in export settings, and SoraVault will automatically fall back to direct download if the proxy is unavailable.
-
-**Q: Is this a Sora scraper or Sora downloader?**
-A: SoraVault acts as a complete Sora video downloader and library backup tool, capturing everything via API rather than traditional screen scraping.
+| Capability | SoraVault 2.7 | OpenAI Export | Manual Download |
+|------------|---------------|---------------|-----------------|
+| Sora 1 generated library | Yes, Sora-only folders | Mixed into full account export | One by one |
+| Sora 1 liked content | Yes | No clean Sora-only liked archive | One by one |
+| Sora 2 published profile videos | Yes | Mixed into full account export | One by one |
+| Sora 2 drafts | Yes | No | One by one, if exposed in UI |
+| Sora 2 liked videos | Yes | No | One by one |
+| Cameos and cameo drafts | Yes | No | Not practical |
+| Your character content | Yes | No | Not practical |
+| Public creator backup by username | Yes | No | One by one |
+| Creator character backup | Yes | No | Not practical |
+| Mirror/passive browsing capture | Yes | No | No |
+| Highest-quality source selection | Yes | Mixed/opaque | Often UI-limited |
+| Prompt `.txt` sidecars | Yes | No | No |
+| Raw JSON metadata manifest | Yes | Limited | No |
+| Filters before download | Yes | No | No |
+| Min/max likes filter | Yes | No | No |
+| Watermark removal | Optional, third-party | No | No |
+| Resume / skip existing files | Yes | No | No |
+| Local-first workflow | Yes | Account export request | Yes |
 
 ---
 
-## ☕ Support This Project
+## Privacy & Security
+
+- **100% local** - no SoraVault server receives your files or prompts.
+- **No SoraVault account** - nothing to sign into besides Sora itself.
+- **No tracking** - no analytics or telemetry.
+- **Open source** - inspect the code before running it.
+- **You choose the folder** - Chrome/Edge can save directly into your selected
+  folder through the File System Access API.
+
+---
+
+## FAQ
+
+**Q: How do I backup my unpublished Sora drafts?**  
+A: Use Regular Backup and keep the Sora 2 Drafts source selected. SoraVault
+connects directly to the drafts endpoint and downloads the full-resolution video
+where available, with prompts if sidecars are enabled. This is one of the key
+things OpenAI's general account export does not currently solve as a clean Sora
+backup.
+
+**Q: Can't I just use OpenAI's official ChatGPT data export?**  
+A: You can, but it is not a focused Sora backup tool. The official export bundles
+Sora content into a much larger ChatGPT account archive, can take time to arrive,
+does not give you Sora-specific filters, does not cleanly cover liked content,
+and does not provide the same direct workflow for drafts, creator backup,
+sidecar prompts, or folder sorting.
+
+**Q: How to export Sora videos in their original, uncompressed resolution?**  
+A: Run SoraVault, scan your sources, and keep quality filters broad unless you
+want to narrow the result set. SoraVault prioritizes source/original media URLs
+where the API exposes them, avoiding preview thumbnails and compressed browser
+surfaces where possible.
+
+**Q: Is there a way to download my "Liked" videos from other creators?**  
+A: Yes. Regular Backup supports Sora 1 liked content and Sora 2 liked videos.
+That means you can back up creator content you liked without opening and saving
+each item manually.
+
+**Q: Can I bulk download Sora creator content by username?**  
+A: Yes. Use Creator Backup, add one or more Sora creator usernames or profile
+URLs, wait for validation, then start the scan. SoraVault can also include those
+creators' characters and appearances.
+
+**Q: Should I use Creator Backup or Mirror Mode for a creator?**  
+A: Use Creator Backup when you want the creator's public library by username.
+Use Mirror Mode when you want to browse manually and capture only what passes
+your live like/keyword filters.
+
+**Q: Why does watermark removal add time to my download?**  
+A: Watermark-free files are fetched through `soravdl.com`, a third-party proxy.
+It can add several seconds per video and may be rate-limited or unavailable.
+SoraVault falls back to direct downloads when the proxy fails. The feature is
+disabled by default and should be treated as optional.
+
+**Q: Is SoraVault a web scraper or an API downloader?**  
+A: SoraVault is primarily an API-driven downloader. Regular Backup talks to Sora
+endpoints directly while you are logged in. Mirror Mode passively watches Sora
+API responses as you browse. It does not need to scroll the page to build your
+regular backup.
+
+**Q: Is this a Sora scraper or Sora downloader?**  
+A: SoraVault acts as a Sora video downloader, Sora image downloader, and Sora
+library backup tool. The normal backup flow is API-driven; Mirror Mode is a
+passive capture mode for content you browse.
+
+**Q: Is it safe to use? Is this legal?**  
+A: SoraVault is intended for backing up content and data you can access while
+logged into Sora. It runs locally in your browser and does not upload your
+content elsewhere.
+
+**Q: I have 500+ files. How long does it take?**  
+A: Scanning is usually much faster than downloading because SoraVault talks to
+the API directly. Download time depends on connection speed, selected output
+formats, worker speed, watermark removal, and whether skip-existing can avoid
+files already on disk.
+
+**Q: Why Tampermonkey and not a browser extension?**  
+A: SoraVault supports both. The Chrome/Edge extension is the recommended install
+path for many users, while Tampermonkey remains useful for people who prefer a
+userscript workflow or want quick script updates.
+
+**Q: Will SoraVault work after Sora shuts down?**  
+A: No. It depends on Sora's live APIs and media URLs. Run your backup before the
+service is unavailable.
+
+---
+
+## Support This Project
 
 If SoraVault saved your library, consider buying me a coffee:
 
-**[☕ buymeacoffee.com/soravault →](https://buymeacoffee.com/soravault)**
+**[buymeacoffee.com/soravault](https://buymeacoffee.com/soravault)**
 
-This is a passion project born from the "oh shit, my stuff is about to vanish" moment.
-Every coffee helps and is deeply appreciated.
+This is a passion project born from the "oh shit, my stuff is about to vanish"
+moment. Every coffee helps and is deeply appreciated.
 
 ---
 
-## 📄 License
+## License
 
-SoraVault – Custom License
+SoraVault - Custom License  
 Copyright (c) 2026 Sebastian Haas (github.com/charyou)
 
-Permission is granted to use this software for personal, non-commercial purposes.
-Personal modifications are permitted for private use.
+Permission is granted to use this software for personal, non-commercial
+purposes. Personal modifications are permitted for private use.
 
-Contributions (pull requests) to the original repository are welcome and encouraged.
+Contributions to the original repository are welcome and encouraged.
 
-The following are NOT permitted without explicit written permission from the author:
-- Redistribution of this software or modified versions, in any form
-- Commercial use, resale, or monetization of this software or derivatives
-- Publishing or distributing modified versions under a different name or identity
+The following are not permitted without explicit written permission from the
+author:
 
-Any public reference to this software must include clear attribution to the original
-author (Sebastian Haas) and a link to https://github.com/charyou/SoraVault.
+- Redistribution of this software or modified versions, in any form.
+- Commercial use, resale, or monetization of this software or derivatives.
+- Publishing or distributing modified versions under a different name or
+  identity.
+
+Any public reference to this software must include clear attribution to the
+original author, Sebastian Haas, and a link to
+https://github.com/charyou/SoraVault.
 
 This software is provided as-is, without warranty of any kind.
 
-*Credits*
+Credits:
+
 - Watermark removal logic inspired by Casey Jardin (MIT License).
 
 ---
 
-*Built with urgency and care by Sebastian* —
- [X](https://x.com/charjou) — [LinkedIn](https://www.linkedin.com/in/-sebastian-haas/)
+*Built with urgency and care by Sebastian* - [X](https://x.com/charjou) -
+[LinkedIn](https://www.linkedin.com/in/-sebastian-haas/)
