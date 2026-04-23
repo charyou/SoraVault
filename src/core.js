@@ -50,7 +50,7 @@
     // CONFIG & RELEASE INFO
     // =====================================================================
     const VERSION      = '2.7.0';
-    const RELEASE_DATE = '2026-04-22';
+    const RELEASE_DATE = '2026-04-23';
     const GITHUB_REPO  = 'charyou/SoraVault';
     const SORA_SHUTDOWN = new Date('2026-04-26T00:00:00Z');
 
@@ -168,6 +168,8 @@
     let totalToDownload    = 0;
     let speedIdx           = 0;
     let uiState            = 'init';
+    let activeStartMode    = 'regular'; // regular | creator | mirror
+    let mirrorStatsTimer   = null;
     let scanStoryTimer     = null;
     let scanStoryIdx       = 0;
     let lastSaveTxt        = false;
@@ -220,7 +222,7 @@
     // Creator Fetch state
     let creatorFetchEnabled      = false;
     let creatorFetchIncludeChars = true;
-    let creatorFetchPersist      = false;
+    let creatorFetchPersist      = true;
     const creators = [];  // Array<{ username, userId, state: 'checking'|'valid'|'invalid'|'error', postCount, characterCount, error? }>
 
     // Source enable/disable state — all enabled by default except preview sources
@@ -236,6 +238,7 @@
         authorExclude: '',   // exclude by author (likes); empty = no filter
         filterSources: new Set(),  // empty = all sources; non-empty = only these
         onlyFavorites: false,      // v1 library only — filter to is_favorite === true
+        minLikes: '', maxLikes: '',
     };
 
     // =====================================================================
@@ -869,10 +872,13 @@
         if (!browseFetchEnabled) { el.textContent = '📡 Off'; el.className = 'sdl-bf-badge'; return; }
         const queued = browseFetchQueue.length;
         const done = browseFetchManifest.size;
+        const savedCount = document.getElementById('sdl-bf-saved-count');
+        if (savedCount) savedCount.textContent = done.toLocaleString();
         el.textContent = queued > 0
             ? `📡 ${browseFetchStats.captured} captured · ${queued} queued`
             : `📡 ${done} saved`;
         el.className = 'sdl-bf-badge on';
+        updateMirrorRunningStats();
     }
 
     // =====================================================================
@@ -884,6 +890,19 @@
             result = result.filter(i => filters.filterSources.has(i.source));
         if (filters.onlyFavorites)
             result = result.filter(i => i.mode === 'v1' && i.isFavorite === true);
+        const minLikes = parseInt(filters.minLikes);
+        const maxLikes = parseInt(filters.maxLikes);
+        const hasMinLikes = !isNaN(minLikes) && minLikes >= 0;
+        const hasMaxLikes = !isNaN(maxLikes) && maxLikes >= 0;
+        if (hasMinLikes || hasMaxLikes) {
+            result = result.filter(i => {
+                const lc = Number(i.likeCount);
+                if (!Number.isFinite(lc)) return false;
+                if (hasMinLikes && lc < minLikes) return false;
+                if (hasMaxLikes && lc > maxLikes) return false;
+                return true;
+            });
+        }
         if (filters.keyword.trim()) {
             const terms = filters.keyword.toLowerCase().split(',').map(t => t.trim()).filter(Boolean);
             result = result.filter(i => terms.every(t => (i.prompt || '').toLowerCase().includes(t)));
@@ -935,6 +954,8 @@
         if (filters.authorExclude.trim()) parts.push(`excl. author: "${filters.authorExclude.trim()}"`);
         if (filters.dateFrom)             parts.push(`from ${filters.dateFrom}`);
         if (filters.dateTo)               parts.push(`to ${filters.dateTo}`);
+        if (filters.minLikes !== '')       parts.push(`min likes: ${filters.minLikes}`);
+        if (filters.maxLikes !== '')       parts.push(`max likes: ${filters.maxLikes}`);
         if (filters.ratios.size)          parts.push(`ratio: ${[...filters.ratios].join(', ')}`);
         if (filters.qualities.size)       parts.push(`quality: ${[...filters.qualities].join(', ')}`);
         if (filters.operations.size)      parts.push(`op: ${[...filters.operations].join(', ')}`);
@@ -1103,6 +1124,23 @@
         if (badge) {
             badge.textContent = isV2Supported ? '✓ available' : '⚠ geo-blocked · Enable a VPN to US to access Sora 2';
             badge.className   = 'sdl-src-group-badge ' + (isV2Supported ? 'badge-ok' : 'badge-blocked');
+        }
+        const creatorCard = document.getElementById('sdl-mode-creator');
+        if (creatorCard) creatorCard.classList.toggle('v2-disabled', !isV2Supported);
+        if (!isV2Supported && activeStartMode === 'creator') {
+            activeStartMode = 'regular';
+            document.querySelectorAll('.sdl-mode-card').forEach(card => {
+                card.classList.toggle('active', card.dataset.mode === 'regular');
+                const arrow = card.querySelector('.sdl-mode-arrow');
+                if (arrow) arrow.textContent = card.dataset.mode === 'regular' ? '⌃' : '⌄';
+            });
+            const regularBody = document.getElementById('sdl-mode-body-regular');
+            const creatorBody = document.getElementById('sdl-cf-body');
+            const mirrorBody  = document.getElementById('sdl-bf-body');
+            if (regularBody) regularBody.style.display = '';
+            if (creatorBody) creatorBody.style.display = 'none';
+            if (mirrorBody)  mirrorBody.style.display = 'none';
+            creatorFetchEnabled = false;
         }
         updateScanButton();
     }
@@ -1348,43 +1386,78 @@
             await FETCH_MAP[src.id]();
         }
 
-        // Creator fetch — activated via the Creators tile, independent of SCAN_SOURCES.
-        if (creatorFetchEnabled && !stopRequested) {
-            const valid = creators.filter(c => c.state === 'valid' && c.userId);
-            if (valid.length > 0) {
-                log(`── Creators (${valid.length}) ──`);
-                for (const c of valid) {
-                    if (stopRequested) break;
-                    log(`👤 ${c.username}`);
-                    await fetchAllV2(
-                        `/backend/project_y/profile_feed/${c.userId}?limit=8&cut=nf2`,
-                        'v2_creator', c.username, { quiet: true, silent: true }
-                    );
-                    if (creatorFetchIncludeChars) {
-                        await fetchCharactersOfUser(c.userId, async (ch) => {
-                            const chId = ch?.user_id;
-                            const chUsername = ch?.username ?? 'unknown';
-                            const chDisplay  = ch?.display_name ?? chUsername;
-                            if (!chId || !chId.startsWith('ch_')) return;
-                            log(`👤 ${c.username} → 🎭 ${chDisplay} (@${chUsername})`);
-                            // For nested character content we still want the creator bucket,
-                            // but ingestV2Page writes author = item.profile.username (= the character),
-                            // which getSubfolderName combines with creatorUsername for the right path.
-                            const tag = c.username;
-                            await fetchAllV2(
-                                `/backend/project_y/profile_feed/${chId}?limit=8&cut=nf2`,
-                                'v2_creator', tag, { quiet: true, silent: true }
-                            );
-                            await fetchAllV2(
-                                `/backend/project_y/profile_feed/${chId}?limit=8&cut=appearances`,
-                                'v2_creator', tag, { quiet: true, silent: true }
-                            );
-                        });
+    }
+
+    function renderCreatorScanProgress(activeName = null) {
+        const el = document.getElementById('sdl-src-progress');
+        if (!el) return;
+        const valid = creators.filter(c => c.state === 'valid' && c.userId);
+        el.innerHTML = valid.map(c => {
+            const active = activeName === c.username;
+            return `<div class="sp-item ${active ? 'sp-active' : 'sp-done'}">
+                <span class="sp-icon">👥</span>
+                <span class="sp-lbl">${c.username}</span>
+                <span class="sp-st">${active ? '◉' : '○'}</span>
+            </div>`;
+        }).join('');
+    }
+
+    async function fetchSelectedCreators() {
+        if (!CFG.BEARER_TOKEN) {
+            try {
+                const sessionRes = await _fetch('/api/auth/session');
+                if (sessionRes.ok) {
+                    const sessionData = await sessionRes.json();
+                    if (sessionData && sessionData.accessToken) {
+                        CFG.BEARER_TOKEN = sessionData.accessToken;
+                        log('✅ Access token automatically fetched');
                     }
                 }
-                log(`Creators ✓  · total ${collected.size}`);
+            } catch (e) {
+                log('⚠ Could not auto-fetch access token');
             }
         }
+
+        for (let w = 0; !oaiDeviceId && w < 40 && !stopRequested; w++) await sleep(250);
+        if (!oaiDeviceId) log('⚠ Auth headers not yet captured — requests may return 401');
+
+        const valid = creators.filter(c => c.state === 'valid' && c.userId);
+        if (valid.length === 0) return;
+
+        log(`── Creators (${valid.length}) ──`);
+        renderCreatorScanProgress();
+        for (const c of valid) {
+            if (stopRequested) break;
+            renderCreatorScanProgress(c.username);
+            log(`👤 ${c.username}`);
+            await fetchAllV2(
+                `/backend/project_y/profile_feed/${c.userId}?limit=8&cut=nf2`,
+                'v2_creator', c.username, { quiet: true, silent: true }
+            );
+            if (creatorFetchIncludeChars) {
+                await fetchCharactersOfUser(c.userId, async (ch) => {
+                    const chId = ch?.user_id;
+                    const chUsername = ch?.username ?? 'unknown';
+                    const chDisplay  = ch?.display_name ?? chUsername;
+                    if (!chId || !chId.startsWith('ch_')) return;
+                    log(`👤 ${c.username} → 🎭 ${chDisplay} (@${chUsername})`);
+                    // For nested character content we still want the creator bucket,
+                    // but ingestV2Page writes author = item.profile.username (= the character),
+                    // which getSubfolderName combines with creatorUsername for the right path.
+                    const tag = c.username;
+                    await fetchAllV2(
+                        `/backend/project_y/profile_feed/${chId}?limit=8&cut=nf2`,
+                        'v2_creator', tag, { quiet: true, silent: true }
+                    );
+                    await fetchAllV2(
+                        `/backend/project_y/profile_feed/${chId}?limit=8&cut=appearances`,
+                        'v2_creator', tag, { quiet: true, silent: true }
+                    );
+                });
+            }
+        }
+        renderCreatorScanProgress();
+        log(`Creators ✓  · total ${collected.size}`);
     }
 
     // =====================================================================
@@ -2040,13 +2113,24 @@
     function updateScanButton() {
         const btn = document.getElementById('sdl-scan');
         if (!btn) return;
+        if (activeStartMode === 'creator') {
+            const valid = creators.filter(c => c.state === 'valid' && c.userId).length;
+            btn.disabled = valid === 0 || !isV2Supported;
+            btn.textContent = valid > 0 ? `Start Scan (${valid} creator${valid !== 1 ? 's' : ''})` : 'Add a valid creator';
+            return;
+        }
+        if (activeStartMode === 'mirror') {
+            btn.disabled = browseFetchEnabled;
+            btn.textContent = browseFetchEnabled ? 'Mirror Mode is running' : 'Start Scan';
+            return;
+        }
         const availableCount = SCAN_SOURCES.filter(s => {
             const cb = document.getElementById('sdl-src-cb-' + s.id);
             return !cb || !cb.disabled;
         }).length;
         const n = enabledSources.size;
         btn.disabled = n === 0;
-        btn.textContent = n >= availableCount ? 'Scan All' : `Scan (${n} source${n !== 1 ? 's' : ''})`;
+        btn.textContent = n >= availableCount ? 'Start Scan' : `Start Scan (${n} source${n !== 1 ? 's' : ''})`;
     }
 
     // =====================================================================
@@ -2123,9 +2207,72 @@
     // =====================================================================
     // SCAN
     // =====================================================================
+    function updateMirrorRunningStats() {
+        const saved = document.getElementById('sdl-mirror-saved');
+        const captured = document.getElementById('sdl-mirror-captured');
+        const queued = document.getElementById('sdl-mirror-queued');
+        const failed = document.getElementById('sdl-mirror-failed');
+        const folder = document.getElementById('sdl-mirror-folder');
+        const filtersEl = document.getElementById('sdl-mirror-filters');
+        if (saved) saved.textContent = browseFetchManifest.size.toLocaleString();
+        if (captured) captured.textContent = browseFetchStats.captured.toLocaleString();
+        if (queued) queued.textContent = browseFetchQueue.length.toLocaleString();
+        if (failed) failed.textContent = browseFetchStats.failed.toLocaleString();
+        if (folder) folder.textContent = browseFetchBaseDir ? `${browseFetchBaseDir.name}/${BROWSE_FETCH_ROOT_NAME}/` : '(no folder picked)';
+        if (filtersEl) {
+            const parts = [];
+            if (browseFetchFilters.minLikes > 0) parts.push(`min likes ${browseFetchFilters.minLikes}`);
+            if (browseFetchFilters.include.length) parts.push(`include: ${browseFetchFilters.include.join(', ')}`);
+            if (browseFetchFilters.exclude.length) parts.push(`exclude: ${browseFetchFilters.exclude.join(', ')}`);
+            parts.push(browseFetchFilters.saveTxt ? 'prompts on' : 'prompts off');
+            filtersEl.textContent = parts.join(' · ');
+        }
+        updateScanButton();
+    }
+
+    function startMirrorStatsTimer() {
+        if (mirrorStatsTimer) clearInterval(mirrorStatsTimer);
+        updateMirrorRunningStats();
+        mirrorStatsTimer = setInterval(updateMirrorRunningStats, 1200);
+    }
+
+    function stopMirrorStatsTimer() {
+        if (mirrorStatsTimer) clearInterval(mirrorStatsTimer);
+        mirrorStatsTimer = null;
+    }
+
+    async function startMirrorMode() {
+        if (browseFetchEnabled) {
+            setState('mirror');
+            startMirrorStatsTimer();
+            return;
+        }
+        const ok = await enableBrowseFetch();
+        if (!ok) {
+            updateScanButton();
+            return;
+        }
+        const bfFolder = document.getElementById('sdl-bf-folder');
+        if (bfFolder && browseFetchBaseDir) bfFolder.textContent = `${browseFetchBaseDir.name}/${BROWSE_FETCH_ROOT_NAME}/`;
+        setState('mirror');
+        startMirrorStatsTimer();
+    }
+
     async function startScan() {
         if (isRunning) return;
-        if (enabledSources.size === 0) {
+        if (activeStartMode === 'mirror') {
+            await startMirrorMode();
+            return;
+        }
+        if (activeStartMode === 'creator' && !isV2Supported) {
+            setStatus('Creator Backup requires Sora 2 access');
+            return;
+        }
+        if (activeStartMode === 'creator' && creators.filter(c => c.state === 'valid' && c.userId).length === 0) {
+            setStatus('Add at least one valid creator');
+            return;
+        }
+        if (activeStartMode === 'regular' && enabledSources.size === 0) {
             setStatus('Select at least one source to scan');
             return;
         }
@@ -2138,7 +2285,8 @@
 
         setState('scanning');
         startScanStories();
-        await fetchSelectedSources();
+        if (activeStartMode === 'creator') await fetchSelectedCreators();
+        else await fetchSelectedSources();
         stopScanStories();
         isRunning = false;
 
@@ -2664,13 +2812,15 @@
     // =====================================================================
     function setState(s) {
         uiState = s;
-        ['init', 'scanning', 'ready', 'downloading', 'done'].forEach(id => {
+        ['init', 'scanning', 'ready', 'downloading', 'done', 'mirror'].forEach(id => {
             const el = document.getElementById('sdl-s-' + id);
             if (el) el.style.display = id === s ? '' : 'none';
         });
+        if (s !== 'mirror') stopMirrorStatsTimer();
         setStatus({
             init:        '',
             scanning:    'API scan running — stop anytime to download what\'s found',
+            mirror:      'Mirror Mode is running — browse Sora and captures will save in the background',
             ready:       '',
             downloading: dlMethod === 'gm'
                 ? 'Saving via Tampermonkey → default Downloads folder'
@@ -2692,10 +2842,11 @@
         filters.keyword = ''; filters.ratios.clear(); filters.dateFrom = ''; filters.dateTo = '';
         filters.qualities.clear(); filters.operations.clear(); filters.nItems = ''; filters.nDirection = 'last';
         filters.authorExclude = ''; filters.filterSources.clear(); filters.onlyFavorites = false;
+        filters.minLikes = ''; filters.maxLikes = '';
     }
 
     function resetFilterInputs() {
-        ['sdl-f-keyword', 'sdl-f-author', 'sdl-f-date-from', 'sdl-f-date-to', 'sdl-f-n-items'].forEach(id => {
+        ['sdl-f-keyword', 'sdl-f-author', 'sdl-f-date-from', 'sdl-f-date-to', 'sdl-f-n-items', 'sdl-f-min-likes', 'sdl-f-max-likes'].forEach(id => {
             const el = document.getElementById(id); if (el) el.value = '';
         });
         document.querySelectorAll('#sdl-filter-drawer .sdl-chip.active').forEach(c => c.classList.remove('active'));
@@ -2809,6 +2960,7 @@
         const count = (filters.keyword.trim() ? 1 : 0) + (filters.nItems.trim() ? 1 : 0)
             + filters.ratios.size + filters.qualities.size + filters.operations.size
             + (filters.dateFrom ? 1 : 0) + (filters.dateTo ? 1 : 0)
+            + (filters.minLikes !== '' ? 1 : 0) + (filters.maxLikes !== '' ? 1 : 0)
             + (filters.authorExclude.trim() ? 1 : 0)
             + filters.filterSources.size + (filters.onlyFavorites ? 1 : 0);
         badge.textContent = count > 0 ? `${count} active` : 'none active';
@@ -2925,7 +3077,7 @@
     const STYLE = `
 #sdl {
   position:fixed; top:16px; right:16px; z-index:2147483647;
-  width:430px; min-width:300px; max-width:720px;
+  width:530px; min-width:300px; max-width:720px;
   max-height:calc(100vh - 32px);
   font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;
   font-size:13px; color:rgba(255,255,255,0.82);
@@ -3033,6 +3185,71 @@
   border:0.5px solid rgba(251,191,36,0.25);
   letter-spacing:0.04em; text-transform:uppercase;
 }
+.sdl-active-pill {
+  font-size:8.5px; font-weight:700; padding:1px 6px; border-radius:4px;
+  background:rgba(251,191,36,0.12); color:rgba(251,191,36,0.9);
+  border:0.5px solid rgba(251,191,36,0.3); text-transform:uppercase;
+  margin-left:6px;
+}
+.sdl-mode-card:not(.active) .sdl-active-pill { display:none; }
+.sdl-mode-card {
+  border:0.5px solid rgba(255,255,255,0.12);
+  border-radius:12px; margin-bottom:8px;
+  background:rgba(255,255,255,0.018);
+  overflow:hidden; transition:border-color 0.16s, background 0.16s, box-shadow 0.16s;
+}
+.sdl-mode-card.active {
+  border-color:rgba(251,191,36,0.95);
+  background:rgba(251,191,36,0.035);
+  box-shadow:0 0 0 1px rgba(251,191,36,0.18) inset;
+}
+.sdl-mode-card.disabled { opacity:0.55; cursor:not-allowed; }
+.sdl-mode-card.v2-disabled { opacity:0.45; }
+.sdl-mode-head {
+  display:flex; align-items:center; gap:10px;
+  padding:12px 13px; cursor:pointer; user-select:none;
+}
+.sdl-mode-card.disabled .sdl-mode-head { cursor:not-allowed; }
+.sdl-mode-radio {
+  width:15px; height:15px; border-radius:50%;
+  border:2px solid rgba(255,255,255,0.42); flex-shrink:0;
+  box-shadow:inset 0 0 0 3px rgba(10,10,10,0.98);
+}
+.sdl-mode-card.active .sdl-mode-radio {
+  border-color:#facc15; background:#fff;
+}
+.sdl-mode-icon {
+  width:30px; height:30px; border-radius:8px;
+  display:flex; align-items:center; justify-content:center; flex-shrink:0;
+  background:rgba(255,255,255,0.07); font-size:16px;
+}
+.sdl-mode-copy { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
+.sdl-mode-title {
+  font-size:13px; font-weight:700; color:rgba(255,255,255,0.9);
+  display:flex; align-items:center; gap:4px; white-space:nowrap;
+}
+.sdl-mode-sub {
+  font-size:10.8px; color:rgba(255,255,255,0.42);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.sdl-mode-arrow, .sdl-mode-lock { color:rgba(255,255,255,0.45); flex-shrink:0; font-size:15px; }
+.sdl-mode-card.active .sdl-mode-arrow { color:rgba(255,255,255,0.75); }
+.sdl-mode-body { padding:0 13px 13px 42px; }
+.sdl-src-note-top { font-size:11px; color:rgba(255,255,255,0.45); margin:2px 0 9px; }
+.sdl-mirror-panel {
+  border:0.5px solid rgba(255,255,255,0.09); border-radius:12px;
+  background:rgba(255,255,255,0.03); margin-bottom:12px; overflow:hidden;
+}
+.sdl-mirror-row {
+  display:flex; align-items:center; justify-content:space-between; gap:10px;
+  padding:9px 12px; border-bottom:0.5px solid rgba(255,255,255,0.055);
+  font-size:11px; color:rgba(255,255,255,0.34);
+}
+.sdl-mirror-row strong {
+  color:rgba(255,255,255,0.78); font-size:11px; font-weight:600;
+  text-align:right; word-break:break-word;
+}
+.sdl-mirror-filters { padding:9px 12px; font-size:10.5px; line-height:1.45; color:rgba(147,197,253,0.72); }
 
 /* Header mini indicator — pulsing 📡 shown only when minimised AND Mirror is active */
 #sdl-bf-mini {
@@ -3120,8 +3337,10 @@
 .sdl-src-group {
   background:rgba(255,255,255,0.025); border:0.5px solid rgba(255,255,255,0.07);
   border-radius:12px; overflow:hidden;
+  display:grid; grid-template-columns:1fr 1fr; gap:8px; padding:10px;
 }
 .sdl-src-group-hd {
+  grid-column:1 / -1; margin:-10px -10px 0;
   display:flex; align-items:center; gap:7px;
   padding:7px 12px 6px;
   font-size:10.5px; font-weight:600; color:rgba(255,255,255,0.45);
@@ -3139,6 +3358,7 @@
 .badge-checking{ background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.35);border:0.5px solid rgba(255,255,255,0.1); }
 
 .sdl-v2-notice {
+  grid-column:1 / -1; margin:0 -10px;
   padding:6px 12px 5px; font-size:10px; line-height:1.45;
   border-bottom:0.5px solid rgba(255,255,255,0.05);
 }
@@ -3147,20 +3367,21 @@
 
 .sdl-src-row {
   display:flex; align-items:center; gap:10px;
-  padding:8px 12px; cursor:pointer;
-  border-bottom:0.5px solid rgba(255,255,255,0.04);
+  padding:10px 11px; cursor:pointer;
+  border:0.5px solid rgba(255,255,255,0.08);
+  border-radius:8px; background:rgba(255,255,255,0.018);
   transition:background 0.12s;
   user-select:none;
 }
-.sdl-src-row:last-child { border-bottom:none; }
+.sdl-src-row:last-child { border-bottom:0.5px solid rgba(255,255,255,0.08); }
 .sdl-src-row:hover { background:rgba(255,255,255,0.035); }
 .sdl-src-row input[type="checkbox"] {
   width:15px; height:15px; flex-shrink:0; cursor:pointer;
   accent-color:#34d399;
 }
 .sdl-src-icon { font-size:14px; line-height:1; flex-shrink:0; }
-.sdl-src-name { font-size:12px; font-weight:500; color:rgba(255,255,255,0.72); flex:1; }
-.sdl-src-sub  { font-size:10px; color:rgba(255,255,255,0.22); white-space:nowrap; }
+.sdl-src-name { font-size:12px; font-weight:600; color:rgba(255,255,255,0.78); flex:1; min-width:0; }
+.sdl-src-sub  { font-size:10px; color:rgba(255,255,255,0.28); white-space:normal; line-height:1.25; }
 .sdl-geo-tag  {
   font-size:9px; padding:1.5px 6px; border-radius:20px;
   background:rgba(251,191,36,0.1); color:rgba(251,191,36,0.7);
@@ -3554,7 +3775,7 @@
   <span id="sdl-logo-fb">🔐</span>
   <span id="sdl-title">SoraVault 2.7   
   <span style="font-size: 8px; display: inline-block; transform: scale(0.8); transform-origin: left; opacity: 0.8;">
-     preview 
+     preview
   </span>
   </span>
   <span id="sdl-bf-mini" title="Mirror is active">📡</span>
@@ -3572,7 +3793,7 @@
         </svg>
     </a>    
 
-       <button class="sdl-hd-btn" id="sdl-gear" title="Settings">&#x2699;</button>
+     <button class="sdl-hd-btn" id="sdl-gear" title="Log &amp; advanced">&#x2637;</button>
     <button class="sdl-hd-btn" id="sdl-min"  title="Minimise">&#x2014;</button>
   </div>
 </div>
@@ -3584,12 +3805,18 @@
   <div id="sdl-s-init">
 
     <!-- ── BACKUP section ───────────────────────────────────── -->
-    <div class="sdl-section sdl-section-backup">
-      <div class="sdl-section-hd">
-        <span class="sdl-section-icon">💾</span>
-        <span class="sdl-section-title">Backup</span>
-        <span class="sdl-section-sub">scan &amp; download your library</span>
+    <div class="sdl-mode-card active" id="sdl-mode-regular" data-mode="regular">
+      <div class="sdl-mode-head" data-mode="regular">
+        <span class="sdl-mode-radio"></span>
+        <span class="sdl-mode-icon">💼</span>
+        <span class="sdl-mode-copy">
+          <span class="sdl-mode-title">Regular Backup <span class="sdl-active-pill">active</span></span>
+          <span class="sdl-mode-sub">Back up your own Sora account data.</span>
+        </span>
+        <span class="sdl-mode-arrow">⌃</span>
       </div>
+      <div class="sdl-mode-body" id="sdl-mode-body-regular">
+        <div class="sdl-src-note-top">Choose what to back up by Sora version.</div>
 
     <div class="sdl-src-groups">
 
@@ -3600,13 +3827,13 @@
           <input type="checkbox" id="sdl-src-cb-v1_library" checked>
           <span class="sdl-src-icon">📷</span>
           <span class="sdl-src-name">Library</span>
-          <span class="sdl-src-sub">V1 image library</span>
+          <span class="sdl-src-sub"> </span>
         </label>
         <label class="sdl-src-row" id="sdl-src-row-v1_liked">
           <input type="checkbox" id="sdl-src-cb-v1_liked" checked>
-          <span class="sdl-src-icon">♡</span>
+          <span class="sdl-src-icon" style="font-size: 14px;">♡</span>
           <span class="sdl-src-name">Likes</span>
-          <span class="sdl-src-sub">V1 liked content</span>
+          <span class="sdl-src-sub">Creator Content</span>
         </label>
       </div>
 
@@ -3621,38 +3848,38 @@
           <input type="checkbox" id="sdl-src-cb-v2_profile" checked>
           <span class="sdl-src-icon">🎬</span>
           <span class="sdl-src-name">Videos</span>
-          <span class="sdl-src-sub">V2 published posts</span>
+          <span class="sdl-src-sub"> </span>
         </label>
         <label class="sdl-src-row" id="sdl-src-row-v2_drafts">
           <input type="checkbox" id="sdl-src-cb-v2_drafts" checked>
           <span class="sdl-src-icon">📋</span>
           <span class="sdl-src-name">Drafts</span>
-          <span class="sdl-src-sub">V2 all generated</span>
+          <span class="sdl-src-sub"> </span>
         </label>
         <label class="sdl-src-row" id="sdl-src-row-v2_liked">
           <input type="checkbox" id="sdl-src-cb-v2_liked" checked>
           <span class="sdl-src-icon">♡</span>
           <span class="sdl-src-name">Liked</span>
-          <span class="sdl-src-sub">V2 liked videos</span>
+          <span class="sdl-src-sub">Creator Content</span>
         </label>
         <label class="sdl-src-row" id="sdl-src-row-v2_cameos">
           <input type="checkbox" id="sdl-src-cb-v2_cameos" checked>
           <span class="sdl-src-icon">👤</span>
           <span class="sdl-src-name">Cameos</span>
-          <span class="sdl-src-sub">V2 posts featuring you</span>
+          <span class="sdl-src-sub">Featuring you</span>
         </label>
         <label class="sdl-src-row" id="sdl-src-row-v2_cameo_drafts">
           <input type="checkbox" id="sdl-src-cb-v2_cameo_drafts" checked>
-          <span class="sdl-src-icon">👤📋</span>
+          <span class="sdl-src-icon">📋</span>
           <span class="sdl-src-name">Cameo drafts</span>
-          <span class="sdl-src-sub">V2 drafts featuring you</span>
+          <span class="sdl-src-sub">Featuring you</span>
         </label>
         <label class="sdl-src-row" id="sdl-src-row-v2_my_characters" title="Preview — your characters' posts + cameo appearances. Drafts endpoint is probed speculatively; please report issues.">
           <input type="checkbox" id="sdl-src-cb-v2_my_characters">
           <span class="sdl-src-icon">🎭</span>
-          <span class="sdl-src-name">Characters <span class="sdl-preview-pill">preview</span></span>
-          <span class="sdl-src-sub">Your characters' posts + appearances
-            · <a href="https://github.com/charyou/SoraVault/issues/new?labels=characters&amp;title=My+Characters+scan+feedback" target="_blank" rel="noopener" class="sdl-src-report">report</a>
+          <span class="sdl-src-name">Characters</span>
+          <span class="sdl-src-sub">
+            <a href="https://github.com/charyou/SoraVault/issues/new?labels=characters&amp;title=My+Characters+scan+feedback" target="_blank" rel="noopener" class="sdl-src-report">report issues</a>
           </span>
         </label>
       </div>
@@ -3660,27 +3887,50 @@
     </div>
 
       <div id="sdl-src-note">Works from any Sora page · no scrolling needed</div>
-      <button class="sdl-btn sdl-btn-primary" id="sdl-scan">Scan All</button>
-      <div style="font-size:10px;color:rgba(255,255,255,0.16);text-align:center;margin-top:6px;line-height:1.5;">
-        Full support on Chrome &amp; Edge · other browsers use Tampermonkey fallback
+    </div>
+    </div>
+
+    <!-- ── CREATORS section (beta, bulk-fetch named creators) ── -->
+    <div class="sdl-mode-card" id="sdl-mode-creator" data-mode="creator">
+      <div class="sdl-mode-head" data-mode="creator">
+        <span class="sdl-mode-radio"></span>
+        <span class="sdl-mode-icon">👥</span>
+        <span class="sdl-mode-copy">
+          <span class="sdl-mode-title">Creator Backup <span class="sdl-active-pill">active</span></span>
+          <span class="sdl-mode-sub">Back up posts and characters from selected creators.</span>
+        </span>
+        <span id="sdl-cf-badge" class="sdl-bf-badge">👥 0</span>
+        <span class="sdl-mode-arrow">⌄</span>
+      </div>
+      <div class="sdl-mode-body" id="sdl-cf-body" style="display:none;">
+        <div id="sdl-cf-chips" class="sdl-cf-chips"></div>
+        <input id="sdl-cf-input" class="sdl-bf-input" placeholder="creator1, creator2, … (comma or Enter to add)" autocomplete="off" spellcheck="false">
+        <div class="sdl-bf-row">
+          <label class="sdl-bf-lbl sdl-bf-lbl-inline">Include each creator's characters
+            <input type="checkbox" id="sdl-cf-include-chars" checked>
+          </label>
+          <label class="sdl-bf-lbl sdl-bf-lbl-inline">Remember across reloads
+            <input type="checkbox" id="sdl-cf-persist" checked>
+          </label>
+        </div>
+        <div class="sdl-bf-hint">Sora 2 only · validates usernames live · folder: <code>sora_v2_creators/&lt;name&gt;/</code></div>
       </div>
     </div>
-    <!-- /Backup section -->
+    <!-- /Creators section -->
 
     <!-- ── MIRROR section (beta, passive capture while browsing) ── -->
-    <div class="sdl-section sdl-section-mirror" id="sdl-bf-tile">
-      <div class="sdl-section-hd">
-        <span class="sdl-section-icon">📡</span>
-        <span class="sdl-section-title">Mirror<span class="sdl-beta-tag">beta</span></span>
+    <div class="sdl-mode-card" id="sdl-mode-mirror" data-mode="mirror">
+      <div class="sdl-mode-head" data-mode="mirror">
+        <span class="sdl-mode-radio"></span>
+        <span class="sdl-mode-icon">🖥️</span>
+        <span class="sdl-mode-copy">
+          <span class="sdl-mode-title">Mirror Mode <span class="sdl-beta-tag">beta</span><span class="sdl-active-pill">active</span></span>
+          <span class="sdl-mode-sub">Captures what you browse in the background.</span>
+        </span>
         <span id="sdl-bf-badge" class="sdl-bf-badge">📡 Off</span>
-        <label class="sdl-toggle sdl-bf-toggle">
-          <input type="checkbox" id="sdl-bf-enable">
-          <div class="sdl-toggle-track"></div>
-          <div class="sdl-toggle-thumb"></div>
-        </label>
+        <span class="sdl-mode-arrow">⌄</span>
       </div>
-      <div class="sdl-bf-sub">Browse Sora normally — I capture IDs you see and download in the background (4 workers).</div>
-      <div id="sdl-bf-body" style="display:none;">
+      <div class="sdl-mode-body" id="sdl-bf-body" style="display:none;">
         <button class="sdl-btn sdl-btn-secondary" id="sdl-bf-pick" style="margin:6px 0;">📂 Pick folder…</button>
         <div id="sdl-bf-folder" class="sdl-bf-folder">(no folder picked yet)</div>
         <div class="sdl-bf-row">
@@ -3697,39 +3947,27 @@
         <label class="sdl-bf-lbl">Exclude keywords (comma-separated — skip on match)
           <textarea id="sdl-bf-exclude" class="sdl-bf-input" rows="1" placeholder="e.g. nsfw"></textarea>
         </label>
-        <div class="sdl-bf-hint">Saves to <code>mirror_browse/sora[1|2]_&lt;path&gt;/</code> · no watermark removal · append-only manifest · <strong>stops on page reload</strong></div>
+        <div class="sdl-bf-hint">Saved now: <strong id="sdl-bf-saved-count">0</strong> · <code>mirror_browse/sora[1|2]_&lt;path&gt;/</code> · no watermark removal · stops on page reload</div>
       </div>
     </div>
     <!-- /Mirror section -->
 
-    <!-- ── CREATORS section (beta, bulk-fetch named creators) ── -->
-    <div class="sdl-section sdl-section-mirror" id="sdl-cf-tile">
-      <div class="sdl-section-hd">
-        <span class="sdl-section-icon">👥</span>
-        <span class="sdl-section-title">Creators<span class="sdl-beta-tag">beta</span></span>
-        <span id="sdl-cf-badge" class="sdl-bf-badge">👥 0</span>
-        <label class="sdl-toggle sdl-bf-toggle">
-          <input type="checkbox" id="sdl-cf-enable">
-          <div class="sdl-toggle-track"></div>
-          <div class="sdl-toggle-thumb"></div>
-        </label>
-      </div>
-      <div class="sdl-bf-sub">Add Sora 2 creators by username — each one's posts + characters get pulled on Scan.</div>
-      <div id="sdl-cf-body" style="display:none;">
-        <div id="sdl-cf-chips" class="sdl-cf-chips"></div>
-        <input id="sdl-cf-input" class="sdl-bf-input" placeholder="creator1, creator2, … (comma or Enter to add)" autocomplete="off" spellcheck="false">
-        <div class="sdl-bf-row">
-          <label class="sdl-bf-lbl sdl-bf-lbl-inline">Include each creator's characters
-            <input type="checkbox" id="sdl-cf-include-chars" checked>
-          </label>
-          <label class="sdl-bf-lbl sdl-bf-lbl-inline">Remember across reloads
-            <input type="checkbox" id="sdl-cf-persist">
-          </label>
-        </div>
-        <div class="sdl-bf-hint">Validates usernames live · persisted list stored locally · folder: <code>sora_v2_creators/&lt;name&gt;/</code></div>
+    <div class="sdl-mode-card disabled" id="sdl-mode-discover" data-mode="discover">
+      <div class="sdl-mode-head">
+        <span class="sdl-mode-radio"></span>
+        <span class="sdl-mode-icon">🔍</span>
+        <span class="sdl-mode-copy">
+          <span class="sdl-mode-title">Discover &amp; Download <span class="sdl-preview-pill">coming soon</span></span>
+          <span class="sdl-mode-sub">Auto-discover creators and continuously download matching content.</span>
+        </span>
+        <span class="sdl-mode-lock">🔒</span>
       </div>
     </div>
-    <!-- /Creators section -->
+
+      <button class="sdl-btn sdl-btn-primary" id="sdl-scan">Start Scan</button>
+      <div style="font-size:10px;color:rgba(255,255,255,0.16);text-align:center;margin-top:6px;line-height:1.5;">
+        Private. Local-first. Built by a Sora creator.
+      </div>
 
   </div>
 
@@ -3750,6 +3988,22 @@
   </div>
 
   <!-- ─── STATE: ready ─────────────────────────────────────── -->
+  <div id="sdl-s-mirror" style="display:none">
+    <div class="sdl-big-count">
+      <span class="n" id="sdl-mirror-saved">0</span>
+      <span class="lbl">mirror items saved</span>
+    </div>
+    <div class="sdl-mirror-panel">
+      <div class="sdl-mirror-row"><span>Folder</span><strong id="sdl-mirror-folder">(no folder picked)</strong></div>
+      <div class="sdl-mirror-row"><span>Captured</span><strong id="sdl-mirror-captured">0</strong></div>
+      <div class="sdl-mirror-row"><span>Queued</span><strong id="sdl-mirror-queued">0</strong></div>
+      <div class="sdl-mirror-row"><span>Failed</span><strong id="sdl-mirror-failed">0</strong></div>
+      <div class="sdl-mirror-filters" id="sdl-mirror-filters">prompts on</div>
+    </div>
+    <button class="sdl-btn sdl-btn-stop" id="sdl-stop-mirror">Stop Mirror Mode</button>
+    <button class="sdl-btn sdl-btn-secondary" id="sdl-mirror-back">Back to start</button>
+  </div>
+
   <div id="sdl-s-ready" style="display:none">
 
     <!-- Export toggles -->
@@ -3836,6 +4090,14 @@
             <div class="sdl-seg"        id="sdl-n-first">&#x2191; First</div>
           </div>
           <input class="sdl-f-inp" id="sdl-f-n-items" type="number" min="1" placeholder="N items — empty = all">
+        </div>
+      </div>
+
+      <div class="sdl-f-sec">
+        <span class="sdl-f-lbl">Likes range</span>
+        <div class="sdl-f-row">
+          <input class="sdl-f-inp" id="sdl-f-min-likes" type="number" min="0" placeholder="Min likes">
+          <input class="sdl-f-inp" id="sdl-f-max-likes" type="number" min="0" placeholder="Max likes">
         </div>
       </div>
 
@@ -4077,8 +4339,36 @@
         });
 
         // ── Settings / Expert drawers ──────────────────────────────────────
-        document.getElementById('sdl-gear').addEventListener('click', () =>
-            document.getElementById('sdl-settings-drawer').classList.toggle('open'));
+        function setStartMode(mode) {
+            if (mode === 'discover') return;
+            if (mode === 'creator' && !isV2Supported) {
+                setStatus('Creator Backup requires Sora 2 access');
+                return;
+            }
+            activeStartMode = mode;
+            document.querySelectorAll('.sdl-mode-card').forEach(card => {
+                card.classList.toggle('active', card.dataset.mode === mode);
+                const arrow = card.querySelector('.sdl-mode-arrow');
+                if (arrow) arrow.textContent = card.dataset.mode === mode ? '⌃' : '⌄';
+            });
+            document.getElementById('sdl-mode-body-regular').style.display = mode === 'regular' ? '' : 'none';
+            document.getElementById('sdl-cf-body').style.display = mode === 'creator' ? '' : 'none';
+            document.getElementById('sdl-bf-body').style.display = mode === 'mirror' ? '' : 'none';
+            creatorFetchEnabled = mode === 'creator';
+            updateCreatorsBadge();
+            updateScanButton();
+        }
+
+        document.querySelectorAll('.sdl-mode-head[data-mode]').forEach(head => {
+            head.addEventListener('click', () => setStartMode(head.dataset.mode));
+        });
+
+        document.getElementById('sdl-gear').addEventListener('click', () => {
+            const foot = document.getElementById('sdl-expert-foot');
+            const drawer = document.getElementById('sdl-expert-drawer');
+            const open = drawer.classList.toggle('open');
+            foot.classList.toggle('open', open);
+        });
 
         document.getElementById('sdl-expert-foot').addEventListener('click', () => {
             const foot = document.getElementById('sdl-expert-foot');
@@ -4095,6 +4385,16 @@
         // ── Primary actions ───────────────────────────────────────────────
         document.getElementById('sdl-scan').addEventListener('click',      startScan);
         document.getElementById('sdl-stop-scan').addEventListener('click', stopAll);
+        document.getElementById('sdl-stop-mirror').addEventListener('click', async () => {
+            await disableBrowseFetch();
+            stopMirrorStatsTimer();
+            setState('init');
+            updateScanButton();
+        });
+        document.getElementById('sdl-mirror-back').addEventListener('click', () => {
+            setState('init');
+            updateScanButton();
+        });
         document.getElementById('sdl-stop-dl').addEventListener('click',   stopAll);
         document.getElementById('sdl-pause').addEventListener('click',     togglePause);
         document.getElementById('sdl-dl').addEventListener('click',        startDownload);
@@ -4111,7 +4411,6 @@
         });
 
         // ── Browse & Fetch (v2.6.0) ─────────────────────────────────────
-        const bfEnable = document.getElementById('sdl-bf-enable');
         const bfBody   = document.getElementById('sdl-bf-body');
         const bfFolder = document.getElementById('sdl-bf-folder');
         const bfMinLikes = document.getElementById('sdl-bf-minlikes');
@@ -4139,21 +4438,7 @@
             } catch { /* user cancelled */ }
         });
 
-        bfEnable.addEventListener('change', async () => {
-            if (bfEnable.checked) {
-                bfBody.style.display = '';
-                syncBfFilters();
-                const ok = await enableBrowseFetch();
-                if (!ok) { bfEnable.checked = false; bfBody.style.display = 'none'; return; }
-                if (browseFetchBaseDir) bfFolder.textContent = browseFetchBaseDir.name + '/' + BROWSE_FETCH_ROOT_NAME + '/';
-            } else {
-                await disableBrowseFetch();
-                bfBody.style.display = 'none';
-            }
-        });
-
         // ── Creators tile (v2.6.1) ──────────────────────────────────────
-        const cfEnable       = document.getElementById('sdl-cf-enable');
         const cfBody         = document.getElementById('sdl-cf-body');
         const cfInput        = document.getElementById('sdl-cf-input');
         const cfChips        = document.getElementById('sdl-cf-chips');
@@ -4219,6 +4504,7 @@
             const valid = creators.filter(c => c.state === 'valid').length;
             cfBadge.textContent = `👥 ${valid}`;
             cfBadge.classList.toggle('on', creatorFetchEnabled && valid > 0);
+            updateScanButton();
         }
 
         function persistCreatorsIfEnabled() {
@@ -4302,12 +4588,6 @@
             if (creatorFetchPersist) persistCreatorsIfEnabled();
             else try { localStorage.removeItem(CREATORS_STORAGE_KEY); } catch (e) {}
         });
-        cfEnable.addEventListener('change', () => {
-            creatorFetchEnabled = cfEnable.checked;
-            cfBody.style.display = creatorFetchEnabled ? '' : 'none';
-            updateCreatorsBadge();
-        });
-
         // Restore persisted creators on panel init
         try {
             const stored = localStorage.getItem(CREATORS_STORAGE_KEY);
@@ -4316,9 +4596,6 @@
                 if (Array.isArray(arr) && arr.length) {
                     cfPersist.checked = true;
                     creatorFetchPersist = true;
-                    cfEnable.checked = true;
-                    creatorFetchEnabled = true;
-                    cfBody.style.display = '';
                     for (const entry of arr) {
                         if (!entry || !entry.username) continue;
                         if (creators.some(c => c.username === entry.username)) continue;
@@ -4358,6 +4635,8 @@
         document.getElementById('sdl-f-keyword').addEventListener('input',    e => { filters.keyword       = e.target.value; recomputeSelection(); });
         document.getElementById('sdl-f-author').addEventListener('input',     e => { filters.authorExclude = e.target.value; recomputeSelection(); });
         document.getElementById('sdl-f-n-items').addEventListener('input',    e => { filters.nItems        = e.target.value; recomputeSelection(); });
+        document.getElementById('sdl-f-min-likes').addEventListener('input',  e => { filters.minLikes      = e.target.value; recomputeSelection(); });
+        document.getElementById('sdl-f-max-likes').addEventListener('input',  e => { filters.maxLikes      = e.target.value; recomputeSelection(); });
         document.getElementById('sdl-f-date-from').addEventListener('change', e => { filters.dateFrom      = e.target.value; recomputeSelection(); });
         document.getElementById('sdl-f-date-to').addEventListener('change',   e => { filters.dateTo        = e.target.value; recomputeSelection(); });
         document.getElementById('sdl-f-v1-fav').addEventListener('click', () => {

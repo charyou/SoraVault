@@ -1,9 +1,50 @@
 # Changelog
 
 All notable user-facing changes to SoraVault are documented here.
-For technical implementation notes, see `sprint-notes.md`.
+For technical implementation notes, see `sprint/codes-sprint-2.7.0.md`.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
+
+---
+
+## [2.7.0] - 2026-04-23
+
+### Added
+
+- **New first-screen mode picker** - rebuilt the startup UI as an exclusive
+  accordion with Regular Backup, Creator Backup, Mirror Mode, and a locked
+  Discover & Download placeholder.
+- **Creator Backup as a standalone mode** - creator scans no longer require any
+  Regular Backup source to be selected. Add valid creators, choose Creator
+  Backup, and start the scan directly.
+- **Mirror Mode from the start screen** - Mirror settings now live in the
+  accordion. Start Scan launches Mirror Mode and shows a dedicated running
+  status screen with saved, captured, queued, failed, folder, and active filter
+  details.
+- **Likes range filter** - page 2 now has minimum and maximum likes filters for
+  Regular Backup and Creator Backup results. When either bound is set, items
+  without a known like count are excluded.
+- **Developer handoff docs** - added `sprint/codes-sprint-2.7.0.md` and
+  `claude.md` to make the 2.7.0 logic changes and current project state easier
+  to pick up in future sessions.
+
+### Changed
+
+- **Remember creators defaults on** - Creator Backup now persists validated
+  creator chips across reloads by default unless the user turns the option off.
+- **Header advanced control** - replaced the settings gear with a Log &
+  advanced control that opens the filename template and log drawer directly.
+- **Start Scan logic** - the primary action now branches by selected mode:
+  Regular Backup scans checked sources, Creator Backup scans valid creators, and
+  Mirror Mode starts passive background capture.
+- **Sora 2 geo handling** - Creator Backup is disabled when Sora 2 is
+  geo-blocked, while Regular Backup can still use Sora 1 sources and Mirror Mode
+  remains available for browsing-based capture.
+
+### Fixed
+
+- Creator Backup no longer gets stuck behind the previous Scan button rule that
+  required at least one regular backup checkbox to be selected.
 
 ---
 
