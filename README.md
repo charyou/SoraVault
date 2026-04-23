@@ -342,35 +342,5 @@ moment. Every coffee helps and is deeply appreciated.
 
 ---
 
-## License
-
-SoraVault - Custom License  
-Copyright (c) 2026 Sebastian Haas (github.com/charyou)
-
-Permission is granted to use this software for personal, non-commercial
-purposes. Personal modifications are permitted for private use.
-
-Contributions to the original repository are welcome and encouraged.
-
-The following are not permitted without explicit written permission from the
-author:
-
-- Redistribution of this software or modified versions, in any form.
-- Commercial use, resale, or monetization of this software or derivatives.
-- Publishing or distributing modified versions under a different name or
-  identity.
-
-Any public reference to this software must include clear attribution to the
-original author, Sebastian Haas, and a link to
-https://github.com/charyou/SoraVault.
-
-This software is provided as-is, without warranty of any kind.
-
-Credits:
-
-- Watermark removal logic inspired by Casey Jardin (MIT License).
-
----
-
 *Built with urgency and care by Sebastian* - [X](https://x.com/charjou) -
 [LinkedIn](https://www.linkedin.com/in/-sebastian-haas/)
