@@ -7,6 +7,45 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ---
 
+## [2.7.1] - 2026-04-24
+
+### Fixed
+
+- Removed "Coming Soon" section. Hotfix
+
+### Previously added in 2.7.0
+
+- **New first-screen mode picker** - rebuilt the startup UI as an exclusive
+  accordion with Regular Backup, Creator Backup, Mirror Mode, and a locked
+  Discover & Download placeholder.
+
+- **Likes range filter** - page 2 now has minimum and maximum likes filters for
+  Regular Backup and Creator Backup results. When either bound is set, items
+  without a known like count are excluded.
+
+- **Creators (beta)** — a new tile below Mirror. Type Sora creator usernames
+  (comma-separated or Enter to add); each becomes a chip that validates live
+  against the Sora API, turning green with post/character counts on success or
+  red if the name isn't found. On Scan All, every valid creator's full post
+  history is fetched automatically and saved to `sora_v2_creators/{name}/`.
+  - **Remember creators across reloads** — toggle "Remember across reloads"
+    to persist your validated creator list in localStorage, so it survives
+    page reloads and tab switches. Re-validates in the background on restore.
+  - **Include characters** — with the checkbox on (default), each creator's
+    characters are also discovered and their posts + cameo appearances pulled
+    automatically into `sora_v2_creators/{name}/characters/{char}/`.
+  - Chips support × removal, `@` prefix stripping, and URL paste
+    (`sora.chatgpt.com/profile/…` → extracts the username).
+
+- **My Characters — preview** (`v2_my_characters`) — new scan source (off by
+  default; tick the checkbox to enable). Discovers all characters you own,
+  then fetches each character's published posts and cameo appearances. Also
+  probes three likely draft endpoints — if your character has drafts and
+  SoraVault misses them, please use the "report" link next to the checkbox.
+  Files land in `sora_v2_characters/{character_name}/`.
+
+---
+
 ## [2.7.0] - 2026-04-23
 
 ### Added

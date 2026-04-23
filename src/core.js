@@ -3952,21 +3952,11 @@
     </div>
     <!-- /Mirror section -->
 
-    <div class="sdl-mode-card disabled" id="sdl-mode-discover" data-mode="discover">
-      <div class="sdl-mode-head">
-        <span class="sdl-mode-radio"></span>
-        <span class="sdl-mode-icon">🔍</span>
-        <span class="sdl-mode-copy">
-          <span class="sdl-mode-title">Discover &amp; Download <span class="sdl-preview-pill">coming soon</span></span>
-          <span class="sdl-mode-sub">Auto-discover creators and continuously download matching content.</span>
-        </span>
-        <span class="sdl-mode-lock">🔒</span>
-      </div>
-    </div>
+  
 
       <button class="sdl-btn sdl-btn-primary" id="sdl-scan">Start Scan</button>
       <div style="font-size:10px;color:rgba(255,255,255,0.16);text-align:center;margin-top:6px;line-height:1.5;">
-        Private. Local-first. Built by a Sora creator.
+        Private. Local-first. Built by a Sebastian, a Sora creator.
       </div>
 
   </div>
