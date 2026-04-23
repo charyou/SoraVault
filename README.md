@@ -21,7 +21,7 @@ waiting for a platform export.
 SoraVault 2.7 redesigns the first screen around exclusive backup modes:
 
 - **Regular Backup** - the main path for backing up your own Sora 1 and Sora 2
-  content.
+  content, even then when you have only access to Sora 2
 - **Creator Backup** - back up public Sora 2 creators by username, including
   their characters when enabled.
 - **Mirror Mode** - browse Sora normally and capture matching content in the
