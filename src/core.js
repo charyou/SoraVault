@@ -188,6 +188,7 @@
     let lastFilterSnap     = [];
     let dlMethod           = 'fs';
     let baseDir            = null;
+    let lastDownloadFolderName = '';
     let cachedUserId       = null;
 
     // Skip-existing state (per download run)
@@ -2130,6 +2131,7 @@
     function updateScanButton() {
         const btn = document.getElementById('sdl-scan');
         if (!btn) return;
+        btn.classList.remove('sdl-btn-stop');
         if (activeStartMode === 'creator') {
             const valid = creators.filter(c => c.state === 'valid' && c.userId).length;
             btn.disabled = valid === 0 || !isV2Supported;
@@ -2137,8 +2139,9 @@
             return;
         }
         if (activeStartMode === 'mirror') {
-            btn.disabled = browseFetchEnabled;
-            btn.textContent = browseFetchEnabled ? 'Mirror Mode is running' : 'Start Scan';
+            btn.disabled = false;
+            btn.textContent = browseFetchEnabled ? 'Stop Mirror Mode' : 'Start Scan';
+            btn.classList.toggle('sdl-btn-stop', browseFetchEnabled);
             return;
         }
         const availableCount = SCAN_SOURCES.filter(s => {
@@ -2207,6 +2210,54 @@
         toastTimer = setTimeout(() => {
             el.classList.remove('tin'); el.classList.add('tout');
         }, ms);
+    }
+
+    function sendExtensionCommand(type, payload = {}) {
+        if (!ENV.EXT_BASE) return Promise.resolve({ ok: false, error: 'extension bridge unavailable' });
+        const id = `sv_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+        return new Promise(resolve => {
+            const timer = setTimeout(() => {
+                window.removeEventListener('message', onMessage);
+                resolve({ ok: false, error: 'extension bridge timeout' });
+            }, 1500);
+            function onMessage(event) {
+                if (event.source !== window) return;
+                const msg = event.data;
+                if (!msg || msg.type !== 'SV_EXT_RESPONSE' || msg.id !== id) return;
+                clearTimeout(timer);
+                window.removeEventListener('message', onMessage);
+                resolve(msg.response || { ok: false });
+            }
+            window.addEventListener('message', onMessage);
+            window.postMessage({ type: 'SV_EXT_COMMAND', id, command: type, payload }, '*');
+        });
+    }
+
+    async function openDownloadFolder() {
+        if (baseDir && dlMethod === 'fs') {
+            try {
+                if (typeof baseDir.requestPermission === 'function') {
+                    await baseDir.requestPermission({ mode: 'readwrite' });
+                }
+                if (typeof window.showDirectoryPicker === 'function') {
+                    await window.showDirectoryPicker({
+                        id: 'soravault-download-folder',
+                        mode: 'readwrite',
+                        startIn: baseDir,
+                    });
+                    return;
+                }
+            } catch(e) {
+                showToast(`Folder selected: ${baseDir.name}`);
+                return;
+            }
+        }
+
+        const res = await sendExtensionCommand('SV_SHOW_DOWNLOADS_FOLDER');
+        if (res.ok) return;
+        showToast(lastDownloadFolderName
+            ? `Folder: ${lastDownloadFolderName}`
+            : 'Browser cannot open the selected folder directly');
     }
 
     // =====================================================================
@@ -2281,9 +2332,20 @@
         startMirrorStatsTimer();
     }
 
+    async function stopMirrorMode() {
+        await disableBrowseFetch();
+        stopMirrorStatsTimer();
+        setState('init');
+        updateScanButton();
+    }
+
     async function startScan() {
         if (isRunning) return;
         if (activeStartMode === 'mirror') {
+            if (browseFetchEnabled) {
+                await stopMirrorMode();
+                return;
+            }
             await startMirrorMode();
             return;
         }
@@ -2327,6 +2389,7 @@
     }
 
     function stopAll() {
+        const wasDownloading = uiState === 'downloading';
         stopRequested = true; isRunning = false;
         // Release any paused workers so they observe stopRequested and exit
         if (isPaused && pauseResolver) { pauseResolver(); pauseResolver = null; }
@@ -2334,6 +2397,12 @@
         pauseGate = Promise.resolve();
         stopScanStories();
         log('Stopped.');
+        if (wasDownloading) {
+            setStatus('Stopping after active downloads finish...');
+            const stopBtn = document.getElementById('sdl-stop-dl');
+            if (stopBtn) stopBtn.textContent = 'Stopping...';
+            return;
+        }
         if (collected.size > 0) { setState('ready'); rebuildAllChips(); recomputeSelection(); }
         else setState('init');
     }
@@ -2540,6 +2609,7 @@
             if (hasFS) {
                 try {
                     baseDir = await window.showDirectoryPicker({ mode: 'readwrite' });
+                    lastDownloadFolderName = baseDir?.name || '';
                     dlMethod = 'fs';
                 } catch(e) {
                     log('Folder selection cancelled.');
@@ -2794,7 +2864,7 @@
 
         if (stopRequested) {
             log(`Stopped — ${completedCount} saved, ${failedCount} failed`);
-            setState('ready');
+            showEndScreen(saveTxt, saveMedia, saveJSON, { stopped: true });
         } else {
             if (saveJSON) log('JSON manifest was saved before media downloads started.');
             // Save download log
@@ -2827,15 +2897,20 @@
         return `${total} second${total !== 1 ? 's' : ''}`;
     }
 
-    function showEndScreen(saveTxt, saveMedia, saveJSON) {
+    function showEndScreen(saveTxt, saveMedia, saveJSON, opts = {}) {
         setState('done');
+        const stopped = opts.stopped === true;
         const timeStr = computeTimeSaved(completedCount, saveTxt);
         const word    = getContentWord();
         const titleEl = document.querySelector('.sdl-done-title');
-        if (titleEl) titleEl.textContent = `${completedCount} ${word} saved. ~${timeStr} back.`;
+        if (titleEl) titleEl.textContent = stopped
+            ? `Stopped — ${completedCount} of ${totalToDownload} ${word} saved.`
+            : `${completedCount} ${word} saved. ~${timeStr} back.`;
         const savedEl = document.getElementById('sdl-done-saved');
         if (savedEl) {
-            savedEl.textContent = (saveTxt ? 'Every prompt. Every experiment. ' : '') + 'Saved to your hard drive.';
+            savedEl.textContent = stopped
+                ? 'Download stopped. Completed files remain saved on disk.'
+                : (saveTxt ? 'Every prompt. Every experiment. ' : '') + 'Saved to your hard drive.';
         }
         const statsEl = document.getElementById('sdl-done-stats');
         if (statsEl) {
@@ -2869,8 +2944,15 @@
         }
         const coffeeMsg = document.querySelector('#sdl-s-done .sdl-coffee-msg');
         if (coffeeMsg) {
-            coffeeMsg.innerHTML = `<strong>You just saved ~${timeStr} of manual work.</strong><br>` +
-                `If that's worth a coffee to you — it means the world.`;
+            coffeeMsg.innerHTML = stopped
+                ? `<strong>Partial backup saved.</strong><br>If SoraVault helped, a coffee still means the world.`
+                : `<strong>You just saved ~${timeStr} of manual work.</strong><br>If that's worth a coffee to you — it means the world.`;
+        }
+        const folderBtn = document.getElementById('sdl-open-folder');
+        if (folderBtn) {
+            folderBtn.style.display = (baseDir || dlMethod !== 'fs') ? '' : 'none';
+            const label = lastDownloadFolderName ? `Open folder: ${lastDownloadFolderName}` : 'Open download folder';
+            folderBtn.textContent = label;
         }
     }
 
@@ -3973,8 +4055,11 @@
 .sdl-done-skipped-lbl { color:rgba(255,255,255,0.2); display:block; margin-bottom:2px; font-size:9px; text-transform:uppercase; letter-spacing:0.07em; }
 .sdl-done-filters-lbl { color:rgba(255,255,255,0.2); display:block; margin-bottom:2px; font-size:9px; text-transform:uppercase; letter-spacing:0.07em; }
 .sdl-done-secondary {
-  display:flex; align-items:center; justify-content:center; gap:8px;
+  display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:8px;
   margin-bottom:12px; font-size:12.5px; color:rgba(255,255,255,0.24);
+}
+.sdl-open-folder-btn {
+  width:auto; margin:0; padding:7px 12px; font-size:12.5px; border-radius:9px;
 }
 .sdl-done-github-link {
   color:rgba(255,255,255,0.58); text-decoration:none; transition:color 0.15s,background 0.15s;
@@ -4489,6 +4574,7 @@
       </div>
     </div>
     <div class="sdl-done-secondary">
+      <button class="sdl-btn sdl-btn-secondary sdl-open-folder-btn" id="sdl-open-folder">Open download folder</button>
       <a class="sdl-done-github-link"
          href="https://github.com/${GITHUB_REPO}"
          target="_blank" rel="noopener noreferrer">
@@ -4660,12 +4746,7 @@
         // ── Primary actions ───────────────────────────────────────────────
         document.getElementById('sdl-scan').addEventListener('click',      startScan);
         document.getElementById('sdl-stop-scan').addEventListener('click', stopAll);
-        document.getElementById('sdl-stop-mirror').addEventListener('click', async () => {
-            await disableBrowseFetch();
-            stopMirrorStatsTimer();
-            setState('init');
-            updateScanButton();
-        });
+        document.getElementById('sdl-stop-mirror').addEventListener('click', stopMirrorMode);
         document.getElementById('sdl-mirror-back').addEventListener('click', () => {
             setState('init');
             updateScanButton();
@@ -4684,6 +4765,7 @@
             rebuildAllChips();
             recomputeSelection();
         });
+        document.getElementById('sdl-open-folder').addEventListener('click', openDownloadFolder);
 
         // ── Browse & Fetch (v2.6.0) ─────────────────────────────────────
         const bfBody   = document.getElementById('sdl-bf-body');

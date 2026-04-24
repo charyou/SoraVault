@@ -4,6 +4,16 @@
  */
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg.type === 'SV_SHOW_DOWNLOADS_FOLDER') {
+        try {
+            chrome.downloads.showDefaultFolder();
+            sendResponse({ ok: true });
+        } catch (e) {
+            sendResponse({ ok: false, error: e?.message || String(e) });
+        }
+        return false;
+    }
+
     if (msg.type !== 'SV_DOWNLOAD') return false;
 
     const { url, filename } = msg;

@@ -285,3 +285,12 @@ Important follow-up consideration:
 
 - Manifest append/dedupe mode is not implemented yet. Current behavior avoids overwrites through timestamped filenames and saves JSON first, but it does not merge with an existing manifest item-by-item.
 - Versioning note: the cumulative scope is large enough to justify a 2.8.0 bump if this ships as a public release, because it includes UI redesign, changed speed presets, JSON timing/filename behavior, asset packaging changes, and filter behavior fixes.
+
+## 2026-04-24 Follow-up: Mirror Stop + End Screen
+
+- Fixed Mirror Mode back-state bug: when Mirror Mode is running and the user returns to the start panel, the main scan button now becomes `Stop Mirror Mode` instead of a disabled `Mirror Mode is running` button. The same stop helper is used by the Mirror running view.
+- Download `Stop` now stays in the download state while active workers finish their current file, then routes to the end screen with partial-save copy instead of jumping back to Panel 2.
+- End screen now has an `Open download folder` action:
+  - For File System Access folder-picker downloads, browser security does not allow directly opening the OS folder. The button tries to reopen the directory picker starting from the selected folder and otherwise shows the selected folder name.
+  - For Chrome extension/default-download fallback flows, bridge/background support `SV_SHOW_DOWNLOADS_FOLDER` and call `chrome.downloads.showDefaultFolder()`.
+- Added a small whitelist in `src/chrome/bridge.js` so page messages can only request the downloads-folder command, not arbitrary extension messages.

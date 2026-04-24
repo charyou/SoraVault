@@ -20,4 +20,19 @@
     }
 
     inject();
+
+    window.addEventListener('message', (event) => {
+        if (event.source !== window) return;
+        const msg = event.data;
+        if (!msg || msg.type !== 'SV_EXT_COMMAND' || !msg.id || !msg.command) return;
+        if (msg.command !== 'SV_SHOW_DOWNLOADS_FOLDER') return;
+
+        chrome.runtime.sendMessage({ type: msg.command, ...(msg.payload || {}) }, (response) => {
+            window.postMessage({
+                type: 'SV_EXT_RESPONSE',
+                id: msg.id,
+                response: response || { ok: !chrome.runtime.lastError, error: chrome.runtime.lastError?.message },
+            }, '*');
+        });
+    });
 })();
