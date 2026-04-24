@@ -220,8 +220,28 @@ Release workflow:
 
 ## Open Tasks
 
+- [x] Replace guessed character draft endpoint probing with the confirmed
+  character draft endpoint:
+  `/backend/project_y/profile/drafts/cameos/character/{chId}?limit=50`.
+- [x] Fetch character appearances through the character backup with
+  `/backend/project_y/profile_feed/{chId}?limit=50&cut=appearances`.
+- [x] Keep character posts, appearances, and drafts grouped under
+  `sora_v2_characters/{character_name}/` by assigning the character context
+  during V2 ingest.
+- [x] Make character ID lookup more tolerant of response shape changes by
+  accepting `user_id`, `id`, `character_id`, or `profile.user_id`.
+- [x] Rebuild generated outputs with `build.py` after the character backup
+  changes.
+- [x] Verify syntax for `src/core.js`, `dist/SoraVault.user.js`, and
+  `dist/chrome-extension/content.js` with `node --check`.
+- [x] Redo download worker configuration so worker count/speed can be changed
+  while downloads are already running. The active download run now owns a live
+  worker-pool scheduler: increasing speed starts additional workers immediately,
+  decreasing speed lets in-flight workers finish their current item before
+  retiring, Tampermonkey/GM mode remains capped at 2 workers, and rapid speed
+  changes are clamped to valid presets.
 - [ ] Live-test Regular Backup with Sora 1-only access.
-- [ ] Live-test Regular Backup with Sora 2 access.
+- [x] Live-test Regular Backup with Sora 2 access.
 - [ ] Live-test Creator Backup with multiple validated creators.
 - [ ] Live-test Creator Backup with persisted creators after reload.
 - [ ] Live-test Mirror Mode with an existing populated manifest.

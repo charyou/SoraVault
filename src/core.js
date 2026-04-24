@@ -1,6 +1,6 @@
 /*! 
   SoraVault 2.7
-  
+
   MIT License
   Copyright © 2026 Sebastian Haas (charyou)
   
@@ -49,7 +49,7 @@
     // =====================================================================
     // CONFIG & RELEASE INFO
     // =====================================================================
-    const VERSION      = '2.7.1';
+    const VERSION      = '2.7.2';
     const RELEASE_DATE = '2026-04-24';
     const GITHUB_REPO  = 'charyou/SoraVault';
     const SORA_SHUTDOWN = new Date('2026-04-26T00:00:00Z');
@@ -190,6 +190,7 @@
     let isPaused           = false;
     let pauseGate          = Promise.resolve();
     let pauseResolver      = null;
+    let downloadWorkerRetune = null;
 
     // Watermark proxy state
     let watermarkRemovalEnabled        = true;
@@ -471,9 +472,9 @@
         };
 
         items.forEach(rawItem => {
-            // Cameo drafts wrap the video object inside rawItem.draft
+            // Cameo/character draft endpoints can wrap the video object inside rawItem.draft.
             let item = rawItem;
-            if (sourceId === 'v2_cameo_drafts') {
+            if (isDrafts && rawItem.draft && typeof rawItem.draft === 'object') {
                 if (!rawItem.draft || typeof rawItem.draft !== 'object') return;
                 item = rawItem.draft;
             }
@@ -504,6 +505,7 @@
                     downloadUrl, previewUrl: item.url ?? null, thumbUrl,
                     width: gw, height: gh, ratio,
                     duration: item.duration_s ?? null, model: null,
+                    author: contextTag,
                     creatorUsername: contextTag,
                     _raw: item,
                 };
@@ -546,7 +548,9 @@
                     duration: att.duration_s ?? null, model: null,
                     isLiked:  post.user_liked === true,
                     likeCount: post.like_count ?? null,
-                    author:   item.profile?.username ?? null,
+                    author:   sourceId === 'v2_my_characters'
+                        ? (contextTag ?? item.profile?.username ?? null)
+                        : (item.profile?.username ?? null),
                     creatorUsername: contextTag,
                     _raw: { post, profile: item.profile },
                 };
@@ -1246,47 +1250,17 @@
         );
     }
 
-    // Character drafts endpoint is not publicly documented. Probe common shapes;
-    // first 200 wins and is remembered for the rest of the scan. 404 → silent skip.
-    let charDraftsEndpointTemplate = null;  // e.g. "/backend/project_y/profile/{id}/drafts/v2?limit=15"
-
     async function fetchCharacterDrafts(chId, characterUsername) {
-        const candidates = charDraftsEndpointTemplate
-            ? [charDraftsEndpointTemplate]
-            : [
-                `/backend/project_y/profile/${chId}/drafts/v2?limit=15`,
-                `/backend/project_y/profile/drafts/characters?character_id=${chId}&limit=15`,
-                `/backend/project_y/profile/drafts/v2?character_id=${chId}&limit=15`,
-            ];
-        for (const endpoint of candidates) {
-            const url = `${location.origin}${endpoint}`;
-            const r = await fetchWithRetry(url, { credentials: 'include', headers: buildHeaders() });
-            if (!r) continue;
-            if (r.status === 404) continue;
-            if (!r.ok) { log(`🎭 ${characterUsername}: drafts probe ${r.status}`); continue; }
-            let data;
-            try { data = await r.json(); } catch(e) { continue; }
-            if (!data || !Array.isArray(data.items)) continue;
-            if (!charDraftsEndpointTemplate && endpoint.includes(chId)) {
-                charDraftsEndpointTemplate = endpoint.replace(chId, '{id}');
-            }
-            ingestV2Page(data, url, 'v2_my_characters', null, characterUsername);
-            // Drain cursor manually (drafts pages rarely have many, but still)
-            let cursor = data.cursor ?? null;
-            while (cursor && !stopRequested) {
-                const sep = endpoint.includes('?') ? '&' : '?';
-                const nextUrl = `${location.origin}${endpoint}${sep}cursor=${encodeURIComponent(cursor)}`;
-                const rn = await fetchWithRetry(nextUrl, { credentials: 'include', headers: buildHeaders() });
-                if (!rn || !rn.ok) break;
-                let dn;
-                try { dn = await rn.json(); } catch(e) { break; }
-                const res = ingestV2Page(dn, nextUrl, 'v2_my_characters', null, characterUsername);
-                cursor = res.nextCursor;
-                if (cursor) await sleep(60);
-            }
-            return true;
-        }
-        return false;
+        const before = collected.size;
+        await fetchAllV2(
+            `/backend/project_y/profile/drafts/cameos/character/${encodeURIComponent(chId)}?limit=50`,
+            'v2_my_characters', characterUsername, { quiet: true, silent: true }
+        );
+        return collected.size > before;
+    }
+
+    function getCharacterId(ch) {
+        return ch?.user_id ?? ch?.id ?? ch?.character_id ?? ch?.profile?.user_id ?? null;
     }
 
     async function fetchCharactersOfUser(userId, onCharacter, statusId = null) {
@@ -1319,23 +1293,23 @@
 
         let charCount = 0;
         await fetchCharactersOfUser(uid, async (ch) => {
-            const chId = ch?.user_id;
+            const chId = getCharacterId(ch);
             const username = ch?.username ?? 'unknown';
             const display  = ch?.display_name ?? username;
             if (!chId || !chId.startsWith('ch_')) return;
             charCount++;
             log(`🎭 ${display} (@${username})`);
             await fetchAllV2(
-                `/backend/project_y/profile_feed/${chId}?limit=8&cut=nf2`,
+                `/backend/project_y/profile_feed/${chId}?limit=50&cut=nf2`,
                 'v2_my_characters', username, { quiet: true, silent: true }
             );
             await fetchAllV2(
-                `/backend/project_y/profile_feed/${chId}?limit=8&cut=appearances`,
+                `/backend/project_y/profile_feed/${chId}?limit=50&cut=appearances`,
                 'v2_my_characters', username, { quiet: true, silent: true }
             );
             const draftsFound = await fetchCharacterDrafts(chId, username);
-            if (!draftsFound && !charDraftsEndpointTemplate) {
-                log(`🎭 ${username}: drafts endpoint not found (posts + appearances captured)`);
+            if (!draftsFound) {
+                log(`🎭 ${username}: no character drafts found (posts + appearances captured)`);
             }
         }, 'v2_my_characters');
 
@@ -2609,6 +2583,45 @@
 
         const dlStart = Date.now();
         let idx = 0;
+        let activeDownloadWorkers = 0;
+        let resolveDownloadWorkersDone;
+        const downloadWorkersDone = new Promise(resolve => { resolveDownloadWorkersDone = resolve; });
+
+        function getDownloadWorkerLimit() {
+            const preset = SPEED_PRESETS[speedIdx] ?? SPEED_PRESETS[0];
+            const workers = dlMethod === 'gm'
+                ? Math.min(2, preset.workers)
+                : preset.workers;
+            return Math.max(1, workers);
+        }
+
+        function getDownloadDelayMs() {
+            return (SPEED_PRESETS[speedIdx] ?? SPEED_PRESETS[0]).delay;
+        }
+
+        function maybeResolveDownloadWorkers() {
+            if ((stopRequested || idx >= items.length) && activeDownloadWorkers === 0) {
+                resolveDownloadWorkersDone();
+            }
+        }
+
+        function scheduleDownloadWorkers() {
+            if (stopRequested) {
+                maybeResolveDownloadWorkers();
+                return;
+            }
+
+            const desired = Math.min(items.length - idx, getDownloadWorkerLimit());
+            while (activeDownloadWorkers < desired && idx < items.length && !stopRequested) {
+                activeDownloadWorkers++;
+                worker().finally(() => {
+                    activeDownloadWorkers--;
+                    scheduleDownloadWorkers();
+                    maybeResolveDownloadWorkers();
+                });
+            }
+            maybeResolveDownloadWorkers();
+        }
 
         async function worker() {
             let prevI = null;
@@ -2616,6 +2629,7 @@
                 // Block here if paused, then re-check stop (stop wins over resume)
                 if (isPaused) await waitIfPaused();
                 if (stopRequested) break;
+                if (activeDownloadWorkers > getDownloadWorkerLimit()) break;
 
                 const i = idx++, item = items[i];
 
@@ -2693,22 +2707,19 @@
                 }
 
                 updateDownloadProgress(dlStart);
-                await sleep(SPEED_PRESETS[speedIdx].delay);
+                await sleep(getDownloadDelayMs());
             }
             // Clean up last item when worker exits loop
             if (prevI !== null) { workerActivities.delete(prevI); scheduleActivityRender(); }
         }
 
-        while (idx < items.length && !stopRequested) {
-            const maxWorkers = dlMethod === 'gm'
-                ? Math.min(2, SPEED_PRESETS[speedIdx].workers)
-                : SPEED_PRESETS[speedIdx].workers;
-            const conc = Math.min(items.length - idx, maxWorkers);
-            await Promise.all(Array.from({ length: conc }, () => worker()));
-        }
+        downloadWorkerRetune = scheduleDownloadWorkers;
+        scheduleDownloadWorkers();
+        await downloadWorkersDone;
 
         isRunning = false;
         isPaused = false;
+        downloadWorkerRetune = null;
         if (pauseResolver) { pauseResolver(); pauseResolver = null; }
         pauseGate = Promise.resolve();
         workerActivities.clear();
@@ -3061,14 +3072,19 @@
     }
 
     function setSpeedIdx(i) {
-        speedIdx = i;
+        const n = Number.isFinite(i) ? i : parseInt(i, 10);
+        speedIdx = Math.max(0, Math.min(SPEED_PRESETS.length - 1, Number.isFinite(n) ? n : 0));
         document.querySelectorAll('.sdl-speed-seg').forEach(el =>
-            el.classList.toggle('active', parseInt(el.dataset.spd) === i));
+            el.classList.toggle('active', parseInt(el.dataset.spd) === speedIdx));
         const hints   = ['2 workers · 60 ms delay · safe', '4 workers · 150 ms delay · aggressive', '8 workers · 60 ms delay · temp block possible!'];
         const classes = ['', 'warn', 'danger'];
         document.querySelectorAll('.sdl-speed-hint').forEach(h => {
-            h.textContent = hints[i]; h.className = 'sdl-speed-hint ' + classes[i];
+            h.textContent = hints[speedIdx]; h.className = 'sdl-speed-hint ' + classes[speedIdx];
         });
+        if (typeof downloadWorkerRetune === 'function') {
+            downloadWorkerRetune();
+            showActivityWarning('Speed updated');
+        }
     }
 
     // =====================================================================
@@ -3775,7 +3791,7 @@
   <span id="sdl-logo-fb">🔐</span>
   <span id="sdl-title">SoraVault 2.7   
   <span style="font-size: 8px; display: inline-block; transform: scale(0.8); transform-origin: left; opacity: 0.8;">
-     preview
+
   </span>
   </span>
   <span id="sdl-bf-mini" title="Mirror is active">📡</span>
