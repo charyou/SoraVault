@@ -1135,6 +1135,8 @@
             const cb  = document.getElementById('sdl-src-cb-' + id);
             const row = document.getElementById('sdl-src-row-' + id);
             if (!cb || !row) return;
+            const tag = row.querySelector('.sdl-geo-tag');
+            if (tag) tag.remove();
 
             if (!isV2Supported) {
                 cb.disabled = true;
@@ -1142,18 +1144,10 @@
                 enabledSources.delete(id);
                 row.style.opacity = '0.4';
                 row.title = 'Geo-blocked';
-                if (!row.querySelector('.sdl-geo-tag')) {
-                    const tag = document.createElement('span');
-                    tag.className   = 'sdl-geo-tag';
-                    tag.textContent = 'Geo-blocked';
-                    row.appendChild(tag);
-                }
             } else {
                 cb.disabled = false;
                 row.style.opacity = '';
                 row.title = '';
-                const tag = row.querySelector('.sdl-geo-tag');
-                if (tag) tag.remove();
             }
         });
 
@@ -3463,16 +3457,23 @@
   width:8px; height:8px; border-radius:50%; background:#34d399;
   box-shadow:0 0 14px rgba(52,211,153,0.75);
 }
+.sdl-mirror-minimize-hint {
+  margin-top:8px; font-size:11px; line-height:1.45; text-align:center;
+  color:rgba(147,197,253,0.72);
+}
 
-/* Header mini indicator — pulsing 📡 shown only when minimised AND Mirror is active */
+/* Header mini indicator: pulsing monitor shown only when minimised and Mirror is active */
 #sdl-bf-mini {
-  display:none; font-size:13px; line-height:1;
+  display:none; width:18px; height:18px; align-items:center; justify-content:center;
+  font-size:14px; line-height:1; color:rgba(147,197,253,0.96);
+  text-shadow:0 0 10px rgba(96,165,250,0.85), 0 0 18px rgba(52,211,153,0.45);
+  filter:drop-shadow(0 0 4px rgba(96,165,250,0.6));
   animation:sdl-bf-mini-pulse 1.8s ease-in-out infinite;
 }
 #sdl.collapsed.bf-on #sdl-bf-mini { display:inline-flex; }
 @keyframes sdl-bf-mini-pulse {
-  0%,100% { opacity:0.5; transform:scale(1); }
-  50%     { opacity:1;   transform:scale(1.12); }
+  0%,100% { opacity:0.62; transform:scale(1); }
+  50%     { opacity:1;    transform:scale(1.12); }
 }
 
 /* ── Mirror tile internals ─────────────────────────────────────── */
@@ -3509,6 +3510,13 @@
 .sdl-bf-input-num { width:70px; }
 .sdl-bf-hint { font-size:9.5px; color:rgba(255,255,255,0.25); margin-top:6px; line-height:1.4; }
 .sdl-bf-hint code { font-family:monospace; color:rgba(147,197,253,0.7); }
+.sdl-mirror-filter-controls {
+  padding:12px 14px 6px; border-bottom:0.5px solid rgba(255,255,255,0.075);
+  background:rgba(255,255,255,0.025);
+}
+.sdl-mirror-filter-controls .sdl-bf-row { margin-bottom:8px; }
+.sdl-mirror-filter-controls .sdl-bf-lbl { color:rgba(255,255,255,0.62); }
+.sdl-mirror-filter-controls .sdl-bf-input { background:rgba(5,10,18,0.32); }
 
 /* ── Creator chips (sdl-cf-*) ─────────────────────────────────── */
 .sdl-cf-chips { display:flex; flex-wrap:wrap; gap:5px; margin:2px 0 6px; min-height:4px; }
@@ -3943,9 +3951,9 @@
 
 /* Settings drawer */
 #sdl-expert-foot {
-  display:flex; align-items:center; gap:8px; margin-top:16px; padding:12px 14px;
+  display:flex; align-items:center; gap:7px; margin-top:16px; padding:10px 13px;
   border:0.5px solid rgba(255,255,255,0.07); border-radius:10px; cursor:pointer; color:rgba(255,255,255,0.36);
-  font-size:11.5px; font-weight:800; letter-spacing:0.04em; text-transform:uppercase; user-select:none; transition:color 0.15s,background 0.15s;
+  font-size:10.5px; font-weight:700; letter-spacing:0.035em; text-transform:uppercase; user-select:none; transition:color 0.15s,background 0.15s;
 }
 #sdl-expert-foot:hover { color:rgba(255,255,255,0.7); background:rgba(255,255,255,0.025); }
 #sdl-expert-foot .exp-line { display:none; }
@@ -4118,7 +4126,7 @@
 
   </span>
   </span>
-  <span id="sdl-bf-mini" title="Mirror is active">📡</span>
+  <span id="sdl-bf-mini" title="Mirror Mode is scanning in the background">&#x1f5a5;&#xfe0f;</span>
   <span id="sdl-update-badge"></span>
   <div id="sdl-header-right">
         
@@ -4323,12 +4331,26 @@
         <span class="lbl">mirror items saved</span>
       </div>
       <div class="sdl-mirror-live"><span class="sdl-mirror-live-dot"></span><span>Mirror Mode is watching your Sora browsing</span></div>
+      <div class="sdl-mirror-minimize-hint">You can minimise SoraVault now. When the glowing monitor is visible, Mirror Mode is still scanning in the background.</div>
     </div>
     <div class="sdl-mirror-panel">
       <div class="sdl-mirror-row"><span>Folder</span><strong id="sdl-mirror-folder">(no folder picked)</strong></div>
       <div class="sdl-mirror-row"><span>Captured</span><strong id="sdl-mirror-captured">0</strong></div>
       <div class="sdl-mirror-row"><span>Queued</span><strong id="sdl-mirror-queued">0</strong></div>
       <div class="sdl-mirror-row"><span>Failed</span><strong id="sdl-mirror-failed">0</strong></div>
+      <div class="sdl-mirror-filter-controls">
+        <div class="sdl-bf-row">
+          <label class="sdl-bf-lbl">Min likes
+            <input type="number" id="sdl-mirror-minlikes" min="0" value="0" class="sdl-bf-input sdl-bf-input-num">
+          </label>
+        </div>
+        <label class="sdl-bf-lbl">Include keywords (comma-separated)
+          <textarea id="sdl-mirror-include" class="sdl-bf-input" rows="1" placeholder="e.g. anime, cyberpunk"></textarea>
+        </label>
+        <label class="sdl-bf-lbl">Exclude keywords (comma-separated)
+          <textarea id="sdl-mirror-exclude" class="sdl-bf-input" rows="1" placeholder="e.g. nsfw"></textarea>
+        </label>
+      </div>
       <div class="sdl-mirror-filters" id="sdl-mirror-filters">prompts on</div>
     </div>
     <button class="sdl-btn sdl-btn-stop" id="sdl-stop-mirror">Stop Mirror Mode</button>
@@ -4775,18 +4797,48 @@
         const bfExclude  = document.getElementById('sdl-bf-exclude');
         const bfSaveTxt  = document.getElementById('sdl-bf-savetxt');
         const bfPick     = document.getElementById('sdl-bf-pick');
+        const mirrorMinLikes = document.getElementById('sdl-mirror-minlikes');
+        const mirrorInclude  = document.getElementById('sdl-mirror-include');
+        const mirrorExclude  = document.getElementById('sdl-mirror-exclude');
 
         const parseTerms = v => (v || '').split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
-        const syncBfFilters = () => {
-            browseFetchFilters.minLikes = Math.max(0, parseInt(bfMinLikes.value) || 0);
-            browseFetchFilters.include  = parseTerms(bfInclude.value);
-            browseFetchFilters.exclude  = parseTerms(bfExclude.value);
-            browseFetchFilters.saveTxt  = bfSaveTxt.checked;
+        const setIfDifferent = (el, value) => {
+            if (el && el.value !== value) el.value = value;
         };
-        bfMinLikes.addEventListener('input', syncBfFilters);
-        bfInclude.addEventListener('input',  syncBfFilters);
-        bfExclude.addEventListener('input',  syncBfFilters);
-        bfSaveTxt.addEventListener('change', syncBfFilters);
+        const syncBfFilterControls = source => {
+            const minLikes = String(browseFetchFilters.minLikes || 0);
+            const include  = browseFetchFilters.include.join(', ');
+            const exclude  = browseFetchFilters.exclude.join(', ');
+            if (source !== 'start') {
+                setIfDifferent(bfMinLikes, minLikes);
+                setIfDifferent(bfInclude, include);
+                setIfDifferent(bfExclude, exclude);
+            }
+            if (source !== 'mirror') {
+                setIfDifferent(mirrorMinLikes, minLikes);
+                setIfDifferent(mirrorInclude, include);
+                setIfDifferent(mirrorExclude, exclude);
+            }
+        };
+        const syncBfFilters = (source = 'start') => {
+            const minEl = source === 'mirror' ? mirrorMinLikes : bfMinLikes;
+            const includeEl = source === 'mirror' ? mirrorInclude : bfInclude;
+            const excludeEl = source === 'mirror' ? mirrorExclude : bfExclude;
+            browseFetchFilters.minLikes = Math.max(0, parseInt(minEl.value) || 0);
+            browseFetchFilters.include  = parseTerms(includeEl.value);
+            browseFetchFilters.exclude  = parseTerms(excludeEl.value);
+            browseFetchFilters.saveTxt  = bfSaveTxt.checked;
+            syncBfFilterControls(source);
+            updateMirrorRunningStats();
+        };
+        bfMinLikes.addEventListener('input', () => syncBfFilters('start'));
+        bfInclude.addEventListener('input',  () => syncBfFilters('start'));
+        bfExclude.addEventListener('input',  () => syncBfFilters('start'));
+        bfSaveTxt.addEventListener('change', () => syncBfFilters('start'));
+        mirrorMinLikes.addEventListener('input', () => syncBfFilters('mirror'));
+        mirrorInclude.addEventListener('input',  () => syncBfFilters('mirror'));
+        mirrorExclude.addEventListener('input',  () => syncBfFilters('mirror'));
+        syncBfFilterControls();
 
         bfPick.addEventListener('click', async () => {
             try {

@@ -294,3 +294,40 @@ Important follow-up consideration:
   - For File System Access folder-picker downloads, browser security does not allow directly opening the OS folder. The button tries to reopen the directory picker starting from the selected folder and otherwise shows the selected folder name.
   - For Chrome extension/default-download fallback flows, bridge/background support `SV_SHOW_DOWNLOADS_FOLDER` and call `chrome.downloads.showDefaultFolder()`.
 - Added a small whitelist in `src/chrome/bridge.js` so page messages can only request the downloads-folder command, not arbitrary extension messages.
+
+## 2026-04-24 Follow-up: Mirror `/backend/search` Profile Pages
+
+- Fixed Mirror Mode capture for Sora profile URLs such as
+  `/explore?user=nanabozo`, where Sora loads results through
+  `/backend/search` instead of the older explore feed shape.
+- Root cause: search responses return rows shaped like
+  `{ ts, metadata, score, generation: { ... } }`. Mirror's opportunistic
+  normalizer only understood flat generation objects or V2 post attachment
+  objects, so it saw the wrapper object, found no `id`/`url`, returned `null`,
+  and queued nothing.
+- Change in `src/core.js`:
+  - `normaliseOpportunisticItem()` now unwraps `raw.generation` before trying
+    the existing V1/V2 normalization paths.
+  - V1 opportunistic items now preserve `encodings.source.path` as
+    `downloadUrl` when the API already provides a signed source URL.
+  - `getDownloadUrl()` now returns `item.downloadUrl` before branching by mode,
+    so opportunistic V1 captures can use the signed URL from `/backend/search`
+    without requiring a second `/backend/generations/{genId}/download` call.
+  - Mirror file extension selection now calls `getFileExt(item)` instead of
+    assuming every V2-shaped capture is an MP4, which keeps image captures from
+    profile/search responses from being mislabeled.
+- Verified with `node --check src\core.js`. Generated `dist/` output was
+  rebuilt locally via an equivalent Node one-liner because `python` was not on
+  PATH in the shell.
+
+## 2026-04-24 Follow-up: Mirror Running Filters
+
+- Integrated Mirror Mode filters into the running Mirror view so `Min likes`,
+  `Include keywords`, and `Exclude keywords` remain editable after Mirror Mode
+  has started.
+- The start-card Mirror controls and running-view Mirror controls now sync to
+  the same `browseFetchFilters` state. Changes made while Mirror Mode is
+  running apply immediately to future captures and update the live filter
+  summary.
+- The running-view controls use unique `sdl-mirror-*` IDs to avoid duplicate
+  DOM IDs while preserving the existing `sdl-bf-*` setup controls.
