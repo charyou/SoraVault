@@ -258,3 +258,30 @@ node --check src\core.js
 node --check dist\chrome-extension\content.js
 git diff --check
 ```
+
+## 2026-04-24 UI Redesign Session Notes
+
+Current session changed the mid-flow and download surfaces after the first-panel redesign:
+
+- Panel 2 / ready state now has modern output-option rows with per-toggle symbols, larger type, and a visible filter summary card. The filters themselves are still the same controls, but the live effect is now shown as "Will download X of Y" directly in the card.
+- Download state now has the new coffee banner using `src/img/coffeemug_big.png` and `src/img/coffeemug_small.png`, a redesigned progress card, category-aware activity text, watermark-removal activity text, ETA, failure count, and active worker count.
+- Download speed changed from 3 presets to 4 presets: Safe (2 workers), Balanced (4 workers), Fast (6 workers), Very Fast (8 workers). Tampermonkey/GM mode still caps active workers at 2.
+- JSON manifest export now runs before media downloads start when enabled, and manifest filenames include date and time to avoid overwrites during repeated or partial backups.
+- Logo and coffee assets now resolve from extension-local `img/*` first, with GitHub raw `src/img` fallback for userscript/Tampermonkey-style execution. Chrome manifest exposes `img/*`, and `build.py` copies `src/img` into `dist/chrome-extension/img`.
+- Regular Backup now includes Characters by default. The old character preview/report-issues wording was removed from the first panel.
+- The source grid in panel 1 now uses a two-line layout for each source: source name first, explanatory comment below. The old "no scrolling needed" copy was removed.
+- Scan-in-progress now uses short, readable personal snippets about Sebastian/Munich/1,800+ Sora images/local-first backup instead of long emoji-heavy story text.
+- Mirror-running state now has a live status hero and modernized stats rows so it matches the newer ready/download panel visual language.
+- Done-screen GitHub star link is slightly larger and button-like, but remains secondary to the Buy Me A Coffee call-to-action.
+- "Expert settings" was renamed to "Log & advanced" and visually softened after becoming too prominent.
+- Follow-up changes in this same UI pass:
+  - Likes filtering now uses a tolerant `readLikeCount()` helper across Sora 1 and Sora 2 shapes (`like_count`, `likeCount`, `likes_count`, `num_likes`, stats/metrics/counts containers, etc.). V1 library items now also store `likeCount` when the API exposes it.
+  - The ready-panel filter summary now uses a conic radial indicator based on selected/total items. The selected count is only shown once in the text, avoiding the duplicated number from the previous pass.
+  - Active filters are now summarized as mini chips under the filter header, so collapsed filters still show what is affecting the selection.
+  - Ready actions changed to a two-button row: compact "Rescan" on the left with "scan resets" subtext, primary Download button on the right.
+  - Watermark Removal row copy was made slightly larger for readability.
+
+Important follow-up consideration:
+
+- Manifest append/dedupe mode is not implemented yet. Current behavior avoids overwrites through timestamped filenames and saves JSON first, but it does not merge with an existing manifest item-by-item.
+- Versioning note: the cumulative scope is large enough to justify a 2.8.0 bump if this ships as a public release, because it includes UI redesign, changed speed presets, JSON timing/filename behavior, asset packaging changes, and filter behavior fixes.

@@ -153,14 +153,12 @@
     ];
 
     const SCAN_STORIES = [
-        { icon: '🎬', text: 'I started with Sora when it first dropped. Hundreds of prompts, late nights, that one image that randomly got 1,000+ likes. All of that matters.' },
-        { icon: '💾', text: 'OpenAI\'s "export"? A full ChatGPT data dump. ZIP link valid 24 hours. Good luck finding your Sora files in 3 years of chat history.' },
-        { icon: '🔍', text: 'Some prompts took hours to get right. The wording, the style, the weird happy accidents. That\'s not data. That\'s your creative memory.' },
-        { icon: '⏳', text: 'I built SoraVault in a weekend because I refused to lose 1,800+ images I actually cared about. Turns out I\'m not the only one.' },
-        { icon: '🏛️', text: 'The live-action Naruto. The fake movie poster. The memes that made my friends cry laughing. No expiring ZIP is taking that from me.' },
-        { icon: '🔐', text: 'Everything goes straight to your hard drive. No cloud, no account, no tracking. Your files, your folder, done.' },
-        { icon: '💡', text: 'After this: filters let you pick by date, keyword, or aspect ratio. Download everything or just the gems.' },
-        { icon: '🧡', text: 'This tool is free. If it saves your library, a coffee or a GitHub star is the best way to say thanks.' },
+        { icon: '01', text: 'Built by Sebastian in Munich after backing up 1,800+ Sora images of his own.' },
+        { icon: '02', text: 'A passion project for creators who used Sora seriously and do not want to lose the work.' },
+        { icon: '03', text: 'Files stay local. No account, no cloud sync, no tracking.' },
+        { icon: '04', text: 'SoraVault keeps the useful metadata too, so old prompts remain searchable.' },
+        { icon: '05', text: 'Made between client work, wedding planning, and one more feature that could not wait.' },
+        { icon: '06', text: 'After the scan, filters let you download everything or only the parts that matter.' },
     ];
 
     // =====================================================================
@@ -260,6 +258,28 @@
     // =====================================================================
     function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
     function gcd(a, b) { return b === 0 ? a : gcd(b, a % b); }
+
+    function readLikeCount(...sources) {
+        const keys = [
+            'like_count', 'likeCount', 'likes_count', 'likesCount',
+            'num_likes', 'numLikes', 'favorite_count', 'favoriteCount',
+        ];
+        for (const src of sources) {
+            if (!src || typeof src !== 'object') continue;
+            for (const key of keys) {
+                const n = Number(src[key]);
+                if (Number.isFinite(n) && n >= 0) return n;
+            }
+            const stats = src.stats ?? src.metrics ?? src.counts ?? null;
+            if (stats && typeof stats === 'object') {
+                for (const key of keys) {
+                    const n = Number(stats[key]);
+                    if (Number.isFinite(n) && n >= 0) return n;
+                }
+            }
+        }
+        return null;
+    }
 
     function shutdownDaysDelta() {
         const now  = new Date();
@@ -398,6 +418,7 @@
                     nVariants,
                     isVideo,
                     isFavorite: gen.is_favorite === true,
+                    likeCount: readLikeCount(gen, task),
                     _raw: { task_id: taskId, task_prompt: prompt, ...gen },
                 };
                 collected.set(genId, entry);
@@ -449,7 +470,7 @@
                 nVariants: gen.n_variants ?? 1,
                 isVideo,
                 author,
-                likeCount: gen.like_count    ?? null,
+                likeCount: readLikeCount(gen),
                 canDownload: gen.can_download ?? null,
                 _raw: gen,
             };
@@ -560,7 +581,7 @@
                     width: gw, height: gh, ratio,
                     duration: att.duration_s ?? null, model: null,
                     isLiked:  post.user_liked === true,
-                    likeCount: post.like_count ?? null,
+                    likeCount: readLikeCount(post, item),
                     author:   sourceId === 'v2_my_characters'
                         ? (contextTag ?? item.profile?.username ?? null)
                         : (item.profile?.username ?? null),
@@ -710,7 +731,7 @@
                 downloadUrl: dl?.trim() ? dl : null, previewUrl: att.url ?? null,
                 width: w, height: h, ratio, duration: att.duration_s ?? null,
                 isLiked: post.user_liked === true,
-                likeCount: post.like_count ?? null,
+                likeCount: readLikeCount(post, raw),
                 author: raw.profile?.username ?? post.author?.username ?? null,
                 _raw: raw,
             };
@@ -738,7 +759,7 @@
                 model: raw.model ?? null, seed: raw.seed ?? null,
                 taskType, nVariants: raw.n_variants ?? 1, isVideo,
                 author: raw.user?.username ?? null,
-                likeCount: raw.like_count ?? null,
+                likeCount: readLikeCount(raw),
                 _raw: raw,
             };
         }
@@ -981,6 +1002,8 @@
         if (filters.dateTo)               parts.push(`to ${filters.dateTo}`);
         if (filters.minLikes !== '')       parts.push(`min likes: ${filters.minLikes}`);
         if (filters.maxLikes !== '')       parts.push(`max likes: ${filters.maxLikes}`);
+        if (filters.filterSources.size)    parts.push(`category: ${[...filters.filterSources].map(id => SOURCE_LABELS[id] || id).join(', ')}`);
+        if (filters.onlyFavorites)         parts.push('favorites only');
         if (filters.ratios.size)          parts.push(`ratio: ${[...filters.ratios].join(', ')}`);
         if (filters.qualities.size)       parts.push(`quality: ${[...filters.qualities].join(', ')}`);
         if (filters.operations.size)      parts.push(`op: ${[...filters.operations].join(', ')}`);
@@ -2136,7 +2159,7 @@
         scanStoryTimer = setInterval(() => {
             scanStoryIdx = (scanStoryIdx + 1) % SCAN_STORIES.length;
             showScanStory(scanStoryIdx);
-        }, 4200);
+        }, 3600);
     }
 
     function stopScanStories() {
@@ -2149,8 +2172,14 @@
         if (!iconEl || !textEl) return;
         const s = SCAN_STORIES[idx];
         iconEl.textContent = s.icon;
+        iconEl.style.opacity = '0';
         textEl.style.opacity = '0';
-        setTimeout(() => { textEl.textContent = s.text; textEl.style.opacity = '1'; }, 180);
+        setTimeout(() => {
+            iconEl.textContent = s.icon;
+            textEl.textContent = s.text;
+            iconEl.style.opacity = '1';
+            textEl.style.opacity = '1';
+        }, 160);
     }
 
     function updateShutdownBadge() {
@@ -2857,8 +2886,8 @@
         if (s !== 'mirror') stopMirrorStatsTimer();
         setStatus({
             init:        '',
-            scanning:    'API scan running — stop anytime to download what\'s found',
-            mirror:      'Mirror Mode is running — browse Sora and captures will save in the background',
+            scanning:    'Scanning your selected Sora sources',
+            mirror:      'Mirror Mode is watching your Sora browsing and saving matches in the background',
             ready:       '',
             downloading: dlMethod === 'gm'
                 ? 'Saving via Tampermonkey → default Downloads folder'
@@ -2985,9 +3014,11 @@
         const pill     = document.getElementById('sdl-counter-pill');
         if (pill) {
             const filtered = selected < total;
+            const pct = total > 0 ? Math.max(0, Math.min(1, selected / total)) : 0;
+            pill.style.setProperty('--sdl-filter-deg', `${Math.round(pct * 360)}deg`);
             pill.innerHTML = filtered
-                ? `Will download <strong>${selected}</strong> of ${total} ${word}`
-                : `Will download <strong>${total}</strong> ${word}`;
+                ? `<span class="sdl-filter-ring" aria-hidden="true"><span></span></span><span class="sdl-filter-summary-text">Will download <strong>${selected}</strong> of ${total} ${word}</span>`
+                : `<span class="sdl-filter-ring" aria-hidden="true"><span></span></span><span class="sdl-filter-summary-text">Will download <strong>${total}</strong> ${word}</span>`;
             pill.classList.toggle('filtered', filtered);
             pill.classList.remove('flash'); void pill.offsetWidth; pill.classList.add('flash');
         }
@@ -2999,7 +3030,29 @@
                 : `Download Selection  (${selected})`;
         }
         updateFilterBadge();
+        updateActiveFilterChips();
         updateWatermarkEstimateBadge();
+    }
+
+    function updateActiveFilterChips() {
+        const wrap = document.getElementById('sdl-filter-active-chips');
+        if (!wrap) return;
+        const parts = snapshotActiveFilters();
+        wrap.innerHTML = '';
+        wrap.style.display = parts.length ? 'flex' : 'none';
+        const shown = parts.slice(0, 4);
+        shown.forEach(label => {
+            const chip = document.createElement('span');
+            chip.className = 'sdl-filter-mini-chip';
+            chip.textContent = label;
+            wrap.appendChild(chip);
+        });
+        if (parts.length > shown.length) {
+            const more = document.createElement('span');
+            more.className = 'sdl-filter-mini-chip more';
+            more.textContent = `+${parts.length - shown.length}`;
+            wrap.appendChild(more);
+        }
     }
 
     function updateFilterBadge() {
@@ -3263,6 +3316,8 @@
   background:rgba(251,191,36,0.035);
   box-shadow:0 0 0 1px rgba(251,191,36,0.18) inset;
 }
+.sdl-mode-card.active .sdl-mode-title { font-size:14px; }
+.sdl-mode-card.active .sdl-mode-sub { color:rgba(255,255,255,0.5); }
 .sdl-mode-card.disabled { opacity:0.55; cursor:not-allowed; }
 .sdl-mode-card.v2-disabled { opacity:0.45; }
 .sdl-mode-head {
@@ -3297,19 +3352,35 @@
 .sdl-mode-body { padding:0 13px 13px 42px; }
 .sdl-src-note-top { font-size:11px; color:rgba(255,255,255,0.45); margin:2px 0 9px; }
 .sdl-mirror-panel {
-  border:0.5px solid rgba(255,255,255,0.09); border-radius:12px;
-  background:rgba(255,255,255,0.03); margin-bottom:12px; overflow:hidden;
+  border:0.5px solid rgba(59,130,246,0.35); border-radius:12px;
+  background:linear-gradient(135deg,rgba(37,99,235,0.11),rgba(15,20,26,0.78)); margin-bottom:14px; overflow:hidden;
+  box-shadow:0 0 0 1px rgba(59,130,246,0.08) inset;
 }
 .sdl-mirror-row {
   display:flex; align-items:center; justify-content:space-between; gap:10px;
-  padding:9px 12px; border-bottom:0.5px solid rgba(255,255,255,0.055);
-  font-size:11px; color:rgba(255,255,255,0.34);
+  padding:11px 14px; border-bottom:0.5px solid rgba(255,255,255,0.075);
+  font-size:12px; color:rgba(255,255,255,0.48);
 }
 .sdl-mirror-row strong {
-  color:rgba(255,255,255,0.78); font-size:11px; font-weight:600;
+  color:rgba(255,255,255,0.88); font-size:13px; font-weight:700;
   text-align:right; word-break:break-word;
 }
-.sdl-mirror-filters { padding:9px 12px; font-size:10.5px; line-height:1.45; color:rgba(147,197,253,0.72); }
+.sdl-mirror-filters { padding:11px 14px; font-size:12px; line-height:1.45; color:rgba(147,197,253,0.88); background:rgba(59,130,246,0.08); }
+.sdl-mirror-hero {
+  padding:16px 18px 14px; border-radius:12px; margin-bottom:14px;
+  border:0.5px solid rgba(255,255,255,0.12); background:rgba(15,20,26,0.72);
+}
+.sdl-mirror-hero .sdl-big-count { margin-bottom:0; }
+.sdl-mirror-hero .sdl-big-count .n { font-size:45px; font-weight:800; }
+.sdl-mirror-hero .sdl-big-count .lbl { font-size:13px; letter-spacing:0; color:rgba(255,255,255,0.46); }
+.sdl-mirror-live {
+  display:flex; align-items:center; justify-content:center; gap:8px; margin-top:12px;
+  font-size:12px; color:rgba(52,211,153,0.88);
+}
+.sdl-mirror-live-dot {
+  width:8px; height:8px; border-radius:50%; background:#34d399;
+  box-shadow:0 0 14px rgba(52,211,153,0.75);
+}
 
 /* Header mini indicator — pulsing 📡 shown only when minimised AND Mirror is active */
 #sdl-bf-mini {
@@ -3426,8 +3497,9 @@
 .sdl-v2-notice-ok      { color:rgba(52,211,153,0.7);  background:rgba(52,211,153,0.04); display:none; }
 
 .sdl-src-row {
-  display:flex; align-items:center; gap:10px;
-  padding:10px 11px; cursor:pointer;
+  display:grid; grid-template-columns:15px 18px 1fr; grid-template-areas:"check icon name" ". . sub";
+  align-items:center; gap:3px 10px;
+  padding:10px 11px; cursor:pointer; min-height:50px;
   border:0.5px solid rgba(255,255,255,0.08);
   border-radius:8px; background:rgba(255,255,255,0.018);
   transition:background 0.12s;
@@ -3436,12 +3508,13 @@
 .sdl-src-row:last-child { border-bottom:0.5px solid rgba(255,255,255,0.08); }
 .sdl-src-row:hover { background:rgba(255,255,255,0.035); }
 .sdl-src-row input[type="checkbox"] {
+  grid-area:check;
   width:15px; height:15px; flex-shrink:0; cursor:pointer;
   accent-color:#34d399;
 }
-.sdl-src-icon { font-size:14px; line-height:1; flex-shrink:0; }
-.sdl-src-name { font-size:12px; font-weight:600; color:rgba(255,255,255,0.78); flex:1; min-width:0; }
-.sdl-src-sub  { font-size:10px; color:rgba(255,255,255,0.28); white-space:normal; line-height:1.25; }
+.sdl-src-icon { grid-area:icon; font-size:14px; line-height:1; flex-shrink:0; }
+.sdl-src-name { grid-area:name; font-size:13px; font-weight:700; color:rgba(255,255,255,0.82); min-width:0; }
+.sdl-src-sub  { grid-area:sub; font-size:11px; color:rgba(255,255,255,0.34); white-space:normal; line-height:1.25; }
 .sdl-geo-tag  {
   font-size:9px; padding:1.5px 6px; border-radius:20px;
   background:rgba(251,191,36,0.1); color:rgba(251,191,36,0.7);
@@ -3449,19 +3522,23 @@
 }
 
 #sdl-src-note {
-  font-size:10px; color:rgba(255,255,255,0.18); text-align:center;
+  font-size:11px; color:rgba(255,255,255,0.32); text-align:center;
   margin-bottom:11px; line-height:1.5;
+}
+.sdl-start-foot {
+  font-size:12px; color:rgba(255,255,255,0.34); text-align:center;
+  margin-top:8px; line-height:1.45; font-weight:500;
 }
 
 /* Source progress (scanning state) */
 #sdl-src-progress {
-  display:flex; flex-wrap:wrap; gap:4px; margin-bottom:12px;
+  display:flex; flex-wrap:wrap; gap:5px; margin-bottom:12px;
 }
 .sp-item {
   display:flex; align-items:center; gap:4px;
-  padding:3px 9px; border-radius:20px;
-  background:rgba(255,255,255,0.04); border:0.5px solid rgba(255,255,255,0.08);
-  font-size:11px; color:rgba(255,255,255,0.3);
+  padding:5px 10px; border-radius:20px;
+  background:rgba(255,255,255,0.045); border:0.5px solid rgba(255,255,255,0.09);
+  font-size:12px; color:rgba(255,255,255,0.38);
 }
 .sp-item .sp-icon { font-size:12px; line-height:1; }
 .sp-item .sp-lbl { color:rgba(255,255,255,0.4); }
@@ -3534,6 +3611,15 @@
 .sdl-btn-pause.sdl-paused:not(:disabled):hover { background:rgba(34,197,94,0.18); }
 .sdl-dl-actions { display:flex; gap:6px; }
 .sdl-dl-actions .sdl-btn { margin-bottom:0; }
+.sdl-ready-actions {
+  display:grid; grid-template-columns:minmax(120px,0.36fr) 1fr; gap:8px; align-items:stretch;
+}
+.sdl-ready-actions .sdl-btn { margin-bottom:0; }
+.sdl-ready-actions #sdl-rescan {
+  font-size:13px; padding:10px 12px; font-weight:700;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px;
+}
+.sdl-rescan-sub { font-size:10px; font-weight:500; color:rgba(255,255,255,0.35); }
 .sdl-prog-bar.sdl-bar-paused { opacity:0.45; background:rgba(251,191,36,0.55); }
 .sdl-btn-ghost { background:none; color:rgba(255,255,255,0.3); border:0.5px solid rgba(255,255,255,0.08); font-size:11.5px; padding:7px 14px; }
 .sdl-btn-ghost:not(:disabled):hover { color:rgba(255,255,255,0.6); border-color:rgba(255,255,255,0.18); }
@@ -3569,6 +3655,8 @@
   font-size:14px; color:rgba(255,255,255,0.88); flex:1; cursor:default; line-height:1.35; font-weight:600;
 }
 .sdl-export-lbl span { font-size:12px; color:rgba(255,255,255,0.42); display:block; margin-top:1px; font-weight:400; }
+.sdl-export-row.watermark .sdl-export-lbl { font-size:15px; }
+.sdl-export-row.watermark .sdl-export-lbl span { font-size:13px; color:rgba(255,255,255,0.5); }
 
 /* Toggle */
 .sdl-toggle { position:relative; width:32px; height:18px; flex-shrink:0; cursor:pointer; display:block; }
@@ -3601,6 +3689,19 @@
 .sdl-filter-edit:hover { background:rgba(255,255,255,0.1); color:#fff; }
 .sdl-filter-edit .sdl-disc-arrow { font-size:11px; }
 .sdl-filter-edit.open .sdl-disc-arrow { transform:rotate(90deg); }
+.sdl-filter-active-chips {
+  display:none; flex-wrap:wrap; gap:5px; margin:-2px 0 10px;
+}
+.sdl-filter-mini-chip {
+  display:inline-flex; align-items:center; max-width:100%;
+  padding:4px 8px; border-radius:8px; font-size:11px; line-height:1.2;
+  color:rgba(191,219,254,0.92); background:rgba(59,130,246,0.14);
+  border:0.5px solid rgba(59,130,246,0.28);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.sdl-filter-mini-chip.more {
+  color:rgba(255,255,255,0.72); background:rgba(255,255,255,0.06); border-color:rgba(255,255,255,0.12);
+}
 .sdl-filter-card .sdl-drawer { margin:0 0 12px; padding-top:10px; border-top:0.5px solid rgba(255,255,255,0.08); }
 #sdl-counter-pill {
   display:flex; align-items:center; justify-content:center; gap:8px; text-align:center;
@@ -3608,12 +3709,21 @@
   background:transparent; border:none; border-radius:0; padding:4px 8px 2px;
   transition:background 0.2s,color 0.2s; line-height:1.3;
 }
-#sdl-counter-pill::before {
-  content:'◴'; display:inline-flex; align-items:center; justify-content:center;
-  width:34px; height:34px; border-radius:50%;
-  border:5px solid rgba(52,211,153,0.35); color:#fff; font-size:16px;
+.sdl-filter-ring {
+  width:36px; height:36px; border-radius:50%; flex:0 0 36px;
+  display:inline-flex; align-items:center; justify-content:center;
+  background:conic-gradient(#34d399 var(--sdl-filter-deg, 360deg), rgba(255,255,255,0.12) 0);
+}
+.sdl-filter-ring span {
+  width:22px; height:22px; border-radius:50%; background:rgba(15,20,26,0.96);
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,0.08);
+  position:relative;
+}
+.sdl-filter-ring span::after {
+  content:''; position:absolute; inset:7px; border-radius:50%; background:rgba(255,255,255,0.72);
 }
 #sdl-counter-pill strong { color:#4ade80; font-size:28px; line-height:1; font-weight:800; }
+.sdl-filter-summary-text { display:inline-flex; align-items:baseline; gap:6px; flex-wrap:wrap; justify-content:center; }
 #sdl-counter-pill.filtered { color:rgba(255,255,255,0.9); }
 #sdl-counter-pill.flash { animation:sdlFlash 0.3s ease; }
 @keyframes sdlFlash { 0%,100%{opacity:1} 50%{opacity:0.55} }
@@ -3752,8 +3862,8 @@
 /* Settings drawer */
 #sdl-expert-foot {
   display:flex; align-items:center; gap:8px; margin-top:16px; padding:12px 14px;
-  border:0.5px solid rgba(255,255,255,0.09); border-radius:10px; cursor:pointer; color:rgba(255,255,255,0.45);
-  font-size:12px; font-weight:800; letter-spacing:0.04em; text-transform:uppercase; user-select:none; transition:color 0.15s,background 0.15s;
+  border:0.5px solid rgba(255,255,255,0.07); border-radius:10px; cursor:pointer; color:rgba(255,255,255,0.36);
+  font-size:11.5px; font-weight:800; letter-spacing:0.04em; text-transform:uppercase; user-select:none; transition:color 0.15s,background 0.15s;
 }
 #sdl-expert-foot:hover { color:rgba(255,255,255,0.7); background:rgba(255,255,255,0.025); }
 #sdl-expert-foot .exp-line { display:none; }
@@ -3807,15 +3917,21 @@
 
 /* Scan story */
 #sdl-scan-story {
-  margin-top:4px; margin-bottom:14px; padding:12px 13px; border-radius:11px;
-  background:rgba(255,255,255,0.03); border:0.5px solid rgba(255,255,255,0.06); text-align:center;
+  margin-top:4px; margin-bottom:14px; padding:16px 17px; border-radius:12px;
+  background:linear-gradient(135deg,rgba(37,99,235,0.12),rgba(15,20,26,0.78));
+  border:0.5px solid rgba(59,130,246,0.28); text-align:left;
+  min-height:118px; display:grid; grid-template-columns:42px 1fr; gap:14px; align-items:center;
 }
-#sdl-story-icon { font-size:18px; display:block; margin-bottom:7px; }
-#sdl-story-text { font-size:11px; color:rgba(255,255,255,0.42); line-height:1.6; transition:opacity 0.35s ease; margin:0; }
+#sdl-story-icon {
+  width:40px; height:40px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+  background:rgba(52,211,153,0.12); border:0.5px solid rgba(52,211,153,0.34);
+  color:#86efac; font-size:12px; font-weight:800; transition:opacity 0.25s ease;
+}
+#sdl-story-text { font-size:14px; color:rgba(255,255,255,0.82); line-height:1.45; transition:opacity 0.25s ease; margin:0; }
 #sdl-shutdown-badge {
-  display:inline-block; margin-top:10px; font-size:9.5px;
-  color:rgba(255,255,255,0.22); background:rgba(255,255,255,0.04);
-  border:0.5px solid rgba(255,255,255,0.07); border-radius:20px; padding:3px 10px;
+  display:inline-block; grid-column:2; margin-top:-8px; font-size:11px;
+  color:rgba(255,255,255,0.46); background:rgba(255,255,255,0.04);
+  border:0.5px solid rgba(255,255,255,0.08); border-radius:20px; padding:4px 10px; width:max-content;
 }
 
 /* Done screen */
@@ -3858,10 +3974,14 @@
 .sdl-done-filters-lbl { color:rgba(255,255,255,0.2); display:block; margin-bottom:2px; font-size:9px; text-transform:uppercase; letter-spacing:0.07em; }
 .sdl-done-secondary {
   display:flex; align-items:center; justify-content:center; gap:8px;
-  margin-bottom:10px; font-size:11px; color:rgba(255,255,255,0.2);
+  margin-bottom:12px; font-size:12.5px; color:rgba(255,255,255,0.24);
 }
-.sdl-done-github-link { color:rgba(255,255,255,0.35); text-decoration:none; transition:color 0.15s; }
-.sdl-done-github-link:hover { color:rgba(255,255,255,0.65); }
+.sdl-done-github-link {
+  color:rgba(255,255,255,0.58); text-decoration:none; transition:color 0.15s,background 0.15s;
+  padding:7px 12px; border-radius:9px; border:0.5px solid rgba(255,255,255,0.1);
+  background:rgba(255,255,255,0.035); font-weight:700;
+}
+.sdl-done-github-link:hover { color:rgba(255,255,255,0.82); background:rgba(255,255,255,0.065); }
 .sdl-done-sep { color:rgba(255,255,255,0.12); }
 
 /* Toast */
@@ -3962,13 +4082,13 @@
           <input type="checkbox" id="sdl-src-cb-v1_library" checked>
           <span class="sdl-src-icon">📷</span>
           <span class="sdl-src-name">Library</span>
-          <span class="sdl-src-sub"> </span>
+          <span class="sdl-src-sub">Your Sora 1 image library</span>
         </label>
         <label class="sdl-src-row" id="sdl-src-row-v1_liked">
           <input type="checkbox" id="sdl-src-cb-v1_liked" checked>
           <span class="sdl-src-icon" style="font-size: 14px;">♡</span>
           <span class="sdl-src-name">Likes</span>
-          <span class="sdl-src-sub">Creator Content</span>
+          <span class="sdl-src-sub">Creator content you liked</span>
         </label>
       </div>
 
@@ -3983,19 +4103,19 @@
           <input type="checkbox" id="sdl-src-cb-v2_profile" checked>
           <span class="sdl-src-icon">🎬</span>
           <span class="sdl-src-name">Videos</span>
-          <span class="sdl-src-sub"> </span>
+          <span class="sdl-src-sub">Published Sora 2 videos</span>
         </label>
         <label class="sdl-src-row" id="sdl-src-row-v2_drafts">
           <input type="checkbox" id="sdl-src-cb-v2_drafts" checked>
           <span class="sdl-src-icon">📋</span>
           <span class="sdl-src-name">Drafts</span>
-          <span class="sdl-src-sub"> </span>
+          <span class="sdl-src-sub">Generated drafts and unpublished work</span>
         </label>
         <label class="sdl-src-row" id="sdl-src-row-v2_liked">
           <input type="checkbox" id="sdl-src-cb-v2_liked" checked>
           <span class="sdl-src-icon">♡</span>
           <span class="sdl-src-name">Liked</span>
-          <span class="sdl-src-sub">Creator Content</span>
+          <span class="sdl-src-sub">Creator content you liked</span>
         </label>
         <label class="sdl-src-row" id="sdl-src-row-v2_cameos">
           <input type="checkbox" id="sdl-src-cb-v2_cameos" checked>
@@ -4019,7 +4139,7 @@
 
     </div>
 
-      <div id="sdl-src-note">Works from any Sora page · no scrolling needed</div>
+      <div id="sdl-src-note">Choose sources, scan once, then filter the backup.</div>
     </div>
     </div>
 
@@ -4088,8 +4208,8 @@
   
 
       <button class="sdl-btn sdl-btn-primary" id="sdl-scan">Start Scan</button>
-      <div style="font-size:10px;color:rgba(255,255,255,0.16);text-align:center;margin-top:6px;line-height:1.5;">
-        Private. Local-first. Built by a Sebastian, a Sora creator.
+      <div class="sdl-start-foot">
+        Private. Local-first. Built by Sebastian in Munich for Sora creators.
       </div>
 
   </div>
@@ -4112,9 +4232,12 @@
 
   <!-- ─── STATE: ready ─────────────────────────────────────── -->
   <div id="sdl-s-mirror" style="display:none">
-    <div class="sdl-big-count">
-      <span class="n" id="sdl-mirror-saved">0</span>
-      <span class="lbl">mirror items saved</span>
+    <div class="sdl-mirror-hero">
+      <div class="sdl-big-count">
+        <span class="n" id="sdl-mirror-saved">0</span>
+        <span class="lbl">mirror items saved</span>
+      </div>
+      <div class="sdl-mirror-live"><span class="sdl-mirror-live-dot"></span><span>Mirror Mode is watching your Sora browsing</span></div>
     </div>
     <div class="sdl-mirror-panel">
       <div class="sdl-mirror-row"><span>Folder</span><strong id="sdl-mirror-folder">(no folder picked)</strong></div>
@@ -4167,7 +4290,7 @@
           <div class="sdl-toggle-thumb"></div>
         </label>
       </div>
-      <div class="sdl-export-row">
+      <div class="sdl-export-row watermark">
         <span class="sdl-export-icon watermark">◇</span>
         <span class="sdl-export-lbl">Watermark Removal<span>Via soravdl.com (3rd party). No support for drafts.</span></span>
         <span class="sdl-export-badge" id="sdl-watermark-estimate">+0 min</span>
@@ -4184,6 +4307,7 @@
         <div class="sdl-filter-title">▽ Filters <span class="sdl-disc-badge" id="sdl-filter-badge">none active</span></div>
         <button type="button" class="sdl-filter-edit" id="sdl-filter-disc">Edit filters <span class="sdl-disc-arrow">&#x203a;</span></button>
       </div>
+      <div class="sdl-filter-active-chips" id="sdl-filter-active-chips"></div>
 
     <div class="sdl-drawer" id="sdl-filter-drawer">
 
@@ -4272,8 +4396,10 @@
 
       <div id="sdl-counter-pill">&#x2014;</div>
     </div>
-    <button class="sdl-btn sdl-btn-primary"   id="sdl-dl"     disabled>Download All</button>
-    <button class="sdl-btn sdl-btn-secondary" id="sdl-rescan">&#x21ba;&#x2002;Rescan</button>
+    <div class="sdl-ready-actions">
+      <button class="sdl-btn sdl-btn-secondary" id="sdl-rescan" title="Clears current scan results and returns to source selection">&#x21ba; Rescan<span class="sdl-rescan-sub">scan resets</span></button>
+      <button class="sdl-btn sdl-btn-primary"   id="sdl-dl"     disabled>Download All</button>
+    </div>
   </div>
 
   <!-- ─── STATE: downloading ───────────────────────────────── -->
