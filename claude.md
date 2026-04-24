@@ -574,6 +574,17 @@ Completed in follow-up:
   `/backend/` traffic, including the Sora sentinel header, not only
   `/backend/project_y/`. Feed probes also set a matching referrer for
   `/explore`, `/explore/images`, and `/explore/videos`.
+- Follow-up correction: Sora 1 feed probes now use the live page `fetch` path
+  for `/backend/feed/*` instead of raw `_fetch`, while suppressing duplicate
+  self-ingest. This lets Sora's own frontend wrapper attach a fresh
+  `openai-sentinel-token` per feed request when available. Learned sentinel
+  presence is logged as "token hidden"; the token value is intentionally never
+  written to the panel log.
+- Second sentinel correction: Discover now warms the selected Sora 1 route in a
+  hidden same-origin iframe (`/explore`, `/explore/images`, `/explore/videos`)
+  and uses that frame's `fetch` for feed requests. Chrome content scripts now
+  run in all same-origin frames, but subframes do not render a visible panel;
+  they only capture and post feed header presence back to the top frame.
 
 Open tasks for the next session:
 

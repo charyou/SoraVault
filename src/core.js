@@ -43,6 +43,10 @@
             return meta?.content || '';
         })(),
     };
+    ENV.isFrame = (() => {
+        try { return ENV.win.top !== ENV.win; }
+        catch { return window.top !== window; }
+    })();
     const GITHUB_RAW_BASE = 'https://raw.githubusercontent.com/charyou/SoraVault/main/';
     function assetUrl(path) {
         return ENV.EXT_BASE ? ENV.EXT_BASE + path : GITHUB_RAW_BASE + path;
@@ -172,6 +176,7 @@
     let oaiDeviceId        = null;
     let oaiLanguage        = 'en-US';
     const storedV2Headers  = {};
+    const learnedBackendHeadersLogged = new Set();
     let isRunning          = false;
     let stopRequested      = false;
     let completedCount     = 0;
@@ -237,6 +242,8 @@
     let   browseFetchManifestTimer = null;
     let   browseFetchManifestLoaded = false;
     const browseFetchDiscoveredEndpoints = new Set();
+    const discoverOwnFetchUrls = new Set();
+    const discoverWarmFrames = new Map();
 
     // Discover & Download state
     let discoverRunning          = false;
@@ -310,6 +317,62 @@
         return diff;
     }
 
+    function normaliseFetchUrl(url) {
+        try { return new URL(url, location.origin).href; }
+        catch { return String(url || ''); }
+    }
+
+    function captureBackendHeaders(url, hdrs, getH) {
+        if (!url || !String(url).includes('/backend/')) return;
+        const SKIP = new Set(['content-type','accept-encoding','accept-language',
+                              'cache-control','pragma','origin','content-length']);
+        const keys = hdrs instanceof Headers ? [...hdrs.keys()] : Object.keys(hdrs || {});
+        let learnedSentinel = false;
+        keys.forEach(k => {
+            const key = String(k || '').toLowerCase();
+            if (!key || SKIP.has(key)) return;
+            const v = getH(k);
+            if (!v) return;
+            storedV2Headers[key] = v;
+            if (key === 'openai-sentinel-token') learnedSentinel = true;
+        });
+        if (learnedSentinel) {
+            let path = '';
+            try { path = new URL(url, location.origin).pathname; } catch { path = String(url || ''); }
+            const logKey = `sentinel:${path}`;
+            if (/\/backend\/feed\//.test(path) && !learnedBackendHeadersLogged.has(logKey)) {
+                learnedBackendHeadersLogged.add(logKey);
+                log(`Discover: learned Sora feed sentinel for ${path} (token hidden)`);
+            }
+            if (ENV.isFrame) {
+                try {
+                    ENV.win.parent.postMessage({
+                        type: 'SORAVAULT_FEED_HEADERS',
+                        path,
+                        headers: { 'openai-sentinel-token': storedV2Headers['openai-sentinel-token'] },
+                    }, location.origin);
+                } catch (e) {}
+            }
+        }
+    }
+
+    if (!ENV.isFrame) {
+        window.addEventListener('message', event => {
+            if (event.origin !== location.origin) return;
+            const msg = event.data;
+            if (!msg || msg.type !== 'SORAVAULT_FEED_HEADERS' || !msg.headers) return;
+            const token = msg.headers['openai-sentinel-token'];
+            if (!token) return;
+            storedV2Headers['openai-sentinel-token'] = token;
+            const path = msg.path || '/backend/feed';
+            const logKey = `frame-sentinel:${path}`;
+            if (!learnedBackendHeadersLogged.has(logKey)) {
+                learnedBackendHeadersLogged.add(logKey);
+                log(`Discover: warm frame learned Sora feed sentinel for ${path} (token hidden)`);
+            }
+        });
+    }
+
     // =====================================================================
     // FETCH INTERCEPT  — captures auth headers from Sora's own requests
     // =====================================================================
@@ -318,6 +381,8 @@
     ENV.win.fetch = async function (...args) {
         const [resource, options] = args;
         const url  = typeof resource === 'string' ? resource : (resource?.url ?? '');
+        const normalisedUrl = normaliseFetchUrl(url);
+        const isOwnDiscoverFetch = discoverOwnFetchUrls.has(normalisedUrl);
         const hdrs = options?.headers ?? {};
         const getH = n => {
             if (hdrs instanceof Headers) return hdrs.get(n);
@@ -328,17 +393,7 @@
         if (devId) { oaiDeviceId = devId; refreshAuthBadge(); }
         if (lang)  oaiLanguage = lang;
 
-        if (url.includes('/backend/')) {
-            const SKIP = new Set(['content-type','accept-encoding','accept-language',
-                                  'cache-control','pragma','origin','content-length']);
-            const keys = hdrs instanceof Headers ? [...hdrs.keys()] : Object.keys(hdrs || {});
-            keys.forEach(k => {
-                if (!SKIP.has(k.toLowerCase())) {
-                    const v = getH(k);
-                    if (v) storedV2Headers[k.toLowerCase()] = v;
-                }
-            });
-        }
+        captureBackendHeaders(url, hdrs, getH);
 
         const response = await _fetch(...args);
         // Snapshot the page URL at intercept time — used to bucket browse-fetch captures by where the user was
@@ -366,7 +421,7 @@
                 response.clone().json().then(d => ingestV2Page(d, url, 'v2_drafts', capturedPath)).catch(() => {});
             }
             // Opportunistic ingest — scan unknown Sora endpoints for capturable media when Browse & Fetch is on.
-            if (!handled && browseFetchEnabled && /\/backend\//.test(url)) {
+            if (!handled && !isOwnDiscoverFetch && browseFetchEnabled && /\/backend\//.test(url)) {
                 response.clone().json().then(d => opportunisticIngest(d, url, capturedPath)).catch(() => {});
             }
         }
@@ -381,9 +436,8 @@
         if (n?.toLowerCase() === 'oai-device-id') { oaiDeviceId = v; refreshAuthBadge(); }
         if (n?.toLowerCase() === 'oai-language')  oaiLanguage = v;
         if (this._sv_url && this._sv_url.includes('/backend/')) {
-            const SKIP = new Set(['content-type','accept-encoding','accept-language',
-                                  'cache-control','pragma','origin','content-length']);
-            if (!SKIP.has(n?.toLowerCase())) storedV2Headers[n.toLowerCase()] = v;
+            const key = String(n || '').toLowerCase();
+            captureBackendHeaders(this._sv_url, { [key]: v }, h => String(h || '').toLowerCase() === key ? v : null);
         }
         return _xhrSetH.apply(this, arguments);
     };
@@ -1749,6 +1803,7 @@
                 cursorParam: 'after',
                 label: cfg.label,
                 capturedPath: cfg.capturedPath,
+                usePageFetch: true,
             }];
         }
         if (top) {
@@ -1775,6 +1830,60 @@
         }];
     }
 
+    async function discoverFetchBackend(url, opts = {}, endpoint = null) {
+        if (!endpoint?.usePageFetch) return _fetch(url, opts);
+        const key = normaliseFetchUrl(url);
+        const routePath = endpoint.capturedPath || topPathForDiscover();
+        const frameWin = await warmDiscoverFeedRoute(routePath);
+        const fetchHost = frameWin?.fetch ? frameWin : ENV.win;
+        const fetchFn = fetchHost.fetch.bind(fetchHost);
+        discoverOwnFetchUrls.add(key);
+        try {
+            // For Sora 1 feed endpoints, the app's own fetch wrapper can attach
+            // a fresh openai-sentinel-token. Raw _fetch can only reuse stale tokens.
+            return await fetchFn(url, opts);
+        } finally {
+            discoverOwnFetchUrls.delete(key);
+        }
+    }
+
+    async function warmDiscoverFeedRoute(routePath) {
+        if (ENV.isFrame || !routePath) return ENV.win;
+        const route = routePath.split('?')[0] || '/explore';
+        const existing = discoverWarmFrames.get(route);
+        if (existing?.win && existing?.iframe?.isConnected) return existing.win;
+        if (!document.body) return ENV.win;
+
+        const iframe = document.createElement('iframe');
+        iframe.src = `${location.origin}${route}`;
+        iframe.tabIndex = -1;
+        iframe.setAttribute('aria-hidden', 'true');
+        iframe.style.cssText = 'position:fixed;width:1px;height:1px;left:-10000px;top:-10000px;opacity:0;pointer-events:none;border:0;';
+
+        const ready = new Promise(resolve => {
+            let done = false;
+            const finish = () => {
+                if (done) return;
+                done = true;
+                setTimeout(() => {
+                    let win = null;
+                    try { win = iframe.contentWindow; } catch (e) {}
+                    resolve(win || ENV.win);
+                }, 1200);
+            };
+            iframe.addEventListener('load', finish, { once: true });
+            setTimeout(finish, 3500);
+        });
+
+        document.body.appendChild(iframe);
+        const entry = { iframe, win: null, ready };
+        discoverWarmFrames.set(route, entry);
+        const win = await ready;
+        entry.win = win || ENV.win;
+        log(`Discover: warmed Sora route ${route} for feed sentinel`);
+        return entry.win;
+    }
+
     async function discoverFetchFeedOnce(token) {
         let anyUseful = false;
         for (const endpoint of discoverFeedEndpoints()) {
@@ -1791,11 +1900,11 @@
                 updateMirrorRunningStats();
                 let r;
                 try {
-                    r = await _fetch(url, {
+                    r = await discoverFetchBackend(url, {
                         credentials: 'include',
                         headers: buildHeaders(),
                         referrer: `${location.origin}${referrerPath}`,
-                    });
+                    }, endpoint);
                 } catch(e) {
                     log(`Discover probe ${endpoint.label}: network error ${e.message}`);
                     break;
@@ -1803,7 +1912,9 @@
                 if (!r.ok) {
                     log(`Discover probe ${endpoint.label}: HTTP ${r.status}`);
                     if (r.status === 400 && !storedV2Headers['openai-sentinel-token']) {
-                        log('Discover: Sora 1 feed may need Sora sentinel headers. Open the matching Explore feed once, then start Discover again.');
+                        log('Discover: no Sora feed sentinel learned yet. Open the matching Explore feed once so Sora can generate it.');
+                    } else if (r.status === 400 && endpoint.usePageFetch) {
+                        log('Discover: Sora feed sentinel was present but rejected/expired; retrying after Sora refreshes the feed page usually fixes this.');
                     }
                     break;
                 }
@@ -5913,7 +6024,9 @@ select.sdl-bf-input { min-height:28px; resize:none; }
         }, 10000);
     }
 
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', createPanel);
-    else setTimeout(createPanel, 500);
+    if (!ENV.isFrame) {
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', createPanel);
+        else setTimeout(createPanel, 500);
+    }
 
 })();
