@@ -230,7 +230,7 @@
     const browseFetchFilters      = {
         minLikes: 0, maxLikes: null, include: [], exclude: [], saveTxt: true,
         version: 'v2', feed: 'explore', dateFrom: '', dateTo: '',
-        ratios: new Set(), includeChars: true, maxCreators: 0, keepPolling: true,
+        v1Feed: 'home', ratios: new Set(), includeChars: true, maxCreators: 0, keepPolling: true,
     };
     const browseFetchManifest     = new Map();  // key → entry
     let   browseFetchManifestDirty = false;
@@ -245,7 +245,14 @@
     let discoverDrainPromise     = null;
     const discoverSeenCreators   = new Map(); // userId/username -> { username, userId }
     const discoverCreatorQueue   = [];
-    const discoverStats          = { pages: 0, creatorsFound: 0, creatorsDone: 0, creatorErrors: 0 };
+    const discoverCreatorStats   = new Map();
+    const discoverStats          = {
+        pages: 0, creatorsFound: 0, creatorsDone: 0, creatorErrors: 0,
+        feedItems: 0, creatorItems: 0, mediaScreened: 0, mediaQueued: 0,
+        mediaFiltered: 0, mediaDuplicate: 0, mediaKnown: 0, mediaDropped: 0,
+        videosQueued: 0, imagesQueued: 0, creatorsWithMedia: 0,
+        current: 'Idle', lastEvent: '', currentCreator: '',
+    };
 
     // Creator Fetch state
     let creatorFetchEnabled      = false;
@@ -321,7 +328,7 @@
         if (devId) { oaiDeviceId = devId; refreshAuthBadge(); }
         if (lang)  oaiLanguage = lang;
 
-        if (url.includes('/backend/project_y/')) {
+        if (url.includes('/backend/')) {
             const SKIP = new Set(['content-type','accept-encoding','accept-language',
                                   'cache-control','pragma','origin','content-length']);
             const keys = hdrs instanceof Headers ? [...hdrs.keys()] : Object.keys(hdrs || {});
@@ -373,7 +380,7 @@
     ENV.win.XMLHttpRequest.prototype.setRequestHeader = function (n, v) {
         if (n?.toLowerCase() === 'oai-device-id') { oaiDeviceId = v; refreshAuthBadge(); }
         if (n?.toLowerCase() === 'oai-language')  oaiLanguage = v;
-        if (this._sv_url && this._sv_url.includes('/backend/project_y/')) {
+        if (this._sv_url && this._sv_url.includes('/backend/')) {
             const SKIP = new Set(['content-type','accept-encoding','accept-language',
                                   'cache-control','pragma','origin','content-length']);
             if (!SKIP.has(n?.toLowerCase())) storedV2Headers[n.toLowerCase()] = v;
@@ -641,25 +648,33 @@
         return Math.max(1, preset.workers || BROWSE_FETCH_WORKERS);
     }
 
-    function matchesBrowseFetchFilter(item) {
+    function browseFetchFilterBlockReason(item) {
         const f = browseFetchFilters;
-        if (f.version === 'v1' && item.mode !== 'v1') return false;
-        if (f.version === 'v2' && item.mode !== 'v2') return false;
+        if (f.version === 'v1' && item.mode !== 'v1') return 'version';
+        if (f.version === 'v2' && item.mode !== 'v2') return 'version';
+        if (browseFetchMode === 'discover' && f.version === 'v1') {
+            if (f.v1Feed === 'videos' && item.isVideo !== true) return 'media type';
+            if (f.v1Feed === 'images' && item.isVideo === true) return 'media type';
+        }
         if (f.minLikes > 0) {
             const lc = Number.isFinite(item.likeCount) ? item.likeCount : 0;
-            if (lc < f.minLikes) return false;
+            if (lc < f.minLikes) return 'min likes';
         }
         if (f.maxLikes != null && f.maxLikes >= 0) {
             const lc = Number.isFinite(item.likeCount) ? item.likeCount : null;
-            if (lc == null || lc > f.maxLikes) return false;
+            if (lc == null || lc > f.maxLikes) return 'max likes';
         }
-        if (f.dateFrom && (!item.date || item.date < f.dateFrom)) return false;
-        if (f.dateTo && (!item.date || item.date > f.dateTo)) return false;
-        if (f.ratios && f.ratios.size > 0 && (!item.ratio || !f.ratios.has(item.ratio))) return false;
+        if (f.dateFrom && (!item.date || item.date < f.dateFrom)) return 'date';
+        if (f.dateTo && (!item.date || item.date > f.dateTo)) return 'date';
+        if (f.ratios && f.ratios.size > 0 && (!item.ratio || !f.ratios.has(item.ratio))) return 'ratio';
         const prompt = (item.prompt || '').toLowerCase();
-        if (f.exclude.length && f.exclude.some(t => prompt.includes(t))) return false;
-        if (f.include.length && !f.include.some(t => prompt.includes(t))) return false;
-        return true;
+        if (f.exclude.length && f.exclude.some(t => prompt.includes(t))) return 'exclude keywords';
+        if (f.include.length && !f.include.some(t => prompt.includes(t))) return 'include keywords';
+        return null;
+    }
+
+    function matchesBrowseFetchFilter(item) {
+        return browseFetchFilterBlockReason(item) == null;
     }
 
     function sanitiseSegment(s) {
@@ -702,23 +717,87 @@
         return dir;
     }
 
+    function discoverCreatorLabelFromPath(pathname) {
+        const parts = (pathname || '').split('/').map(sanitiseSegment).filter(Boolean);
+        const idx = parts.indexOf('profile');
+        return idx >= 0 && parts[idx + 1] ? parts[idx + 1] : null;
+    }
+
+    function discoverRememberMediaDecision(item, status, pathname) {
+        if (!discoverRunning || browseFetchMode !== 'discover') return;
+        discoverStats.mediaScreened++;
+        const creatorLabel = item.creatorUsername || discoverCreatorLabelFromPath(pathname) ||
+            (item.source === 'v1_discover_creator' ? item.author : null);
+        const isCreatorItem = item.source === 'v2_creator' || item.source === 'v1_discover_creator' || !!creatorLabel;
+        if (isCreatorItem) discoverStats.creatorItems++;
+        else discoverStats.feedItems++;
+
+        let creatorStats = null;
+        if (isCreatorItem) {
+            const key = creatorLabel || item.author || 'unknown';
+            if (!discoverCreatorStats.has(key)) {
+                discoverCreatorStats.set(key, { screened: 0, queued: 0, filtered: 0, duplicate: 0, known: 0, dropped: 0 });
+            }
+            creatorStats = discoverCreatorStats.get(key);
+            creatorStats.screened++;
+        }
+
+        if (status === 'queued') {
+            discoverStats.mediaQueued++;
+            if (item.isVideo || item.mode === 'v2') discoverStats.videosQueued++;
+            else discoverStats.imagesQueued++;
+            if (creatorStats) {
+                if (creatorStats.queued === 0) discoverStats.creatorsWithMedia++;
+                creatorStats.queued++;
+            }
+        } else if (status && status.startsWith('filtered')) {
+            discoverStats.mediaFiltered++;
+            if (creatorStats) creatorStats.filtered++;
+        } else if (status === 'duplicate') {
+            discoverStats.mediaDuplicate++;
+            if (creatorStats) creatorStats.duplicate++;
+        } else if (status === 'known') {
+            discoverStats.mediaKnown++;
+            if (creatorStats) creatorStats.known++;
+        } else if (status === 'dropped') {
+            discoverStats.mediaDropped++;
+            if (creatorStats) creatorStats.dropped++;
+        }
+        const label = creatorLabel ? `creator ${creatorLabel}` : 'feed';
+        discoverStats.lastEvent = `${label}: ${status || 'seen'}${item.isVideo || item.mode === 'v2' ? ' video' : ' image'}`;
+    }
+
     function maybeEnqueueBrowseFetch(item, pathname) {
-        if (!browseFetchEnabled) return;
+        if (!browseFetchEnabled) return 'disabled';
         const key = browseFetchKey(item);
-        if (!key) return;
-        if (browseFetchSeen.has(key)) return;
-        if (browseFetchManifest.has(key)) { browseFetchSeen.add(key); return; }
-        if (!matchesBrowseFetchFilter(item)) return;
+        if (!key) return 'no-key';
+        if (browseFetchSeen.has(key)) {
+            discoverRememberMediaDecision(item, 'duplicate', pathname);
+            return 'duplicate';
+        }
+        if (browseFetchManifest.has(key)) {
+            browseFetchSeen.add(key);
+            discoverRememberMediaDecision(item, 'known', pathname);
+            return 'known';
+        }
+        const filterReason = browseFetchFilterBlockReason(item);
+        if (filterReason) {
+            discoverRememberMediaDecision(item, `filtered:${filterReason}`, pathname);
+            return `filtered:${filterReason}`;
+        }
         if (browseFetchQueue.length >= BROWSE_FETCH_QUEUE_MAX) {
             browseFetchStats.dropped++;
             updateBrowseFetchBadge();
-            return;
+            discoverRememberMediaDecision(item, 'dropped', pathname);
+            return 'dropped';
         }
         browseFetchSeen.add(key);
         browseFetchQueue.push({ item, pathname: pathname || '/' });
         browseFetchStats.captured++;
+        discoverRememberMediaDecision(item, 'queued', pathname);
         updateBrowseFetchBadge();
         startBrowseFetchWorkers();
+        return 'queued';
     }
 
     // Opportunistic walk — scan unknown /backend/ responses for post- or task-shaped objects.
@@ -1527,10 +1606,25 @@
     function resetDiscoverState() {
         discoverSeenCreators.clear();
         discoverCreatorQueue.length = 0;
+        discoverCreatorStats.clear();
         discoverStats.pages = 0;
         discoverStats.creatorsFound = 0;
         discoverStats.creatorsDone = 0;
         discoverStats.creatorErrors = 0;
+        discoverStats.feedItems = 0;
+        discoverStats.creatorItems = 0;
+        discoverStats.mediaScreened = 0;
+        discoverStats.mediaQueued = 0;
+        discoverStats.mediaFiltered = 0;
+        discoverStats.mediaDuplicate = 0;
+        discoverStats.mediaKnown = 0;
+        discoverStats.mediaDropped = 0;
+        discoverStats.videosQueued = 0;
+        discoverStats.imagesQueued = 0;
+        discoverStats.creatorsWithMedia = 0;
+        discoverStats.current = 'Starting';
+        discoverStats.lastEvent = '';
+        discoverStats.currentCreator = '';
     }
 
     function discoverCreatorKey(profile) {
@@ -1549,7 +1643,7 @@
     }
 
     function discoverRememberCreator(profile) {
-        if (browseFetchFilters.version !== 'v2') return false;
+        if (browseFetchFilters.version !== 'v1' && browseFetchFilters.version !== 'v2') return false;
         const c = normaliseDiscoverProfile(profile);
         const key = discoverCreatorKey(c);
         if (!key || discoverSeenCreators.has(key)) return false;
@@ -1579,7 +1673,22 @@
         }
     }
 
-    function discoverIngestFeedPayload(data, urlPath) {
+    function discoverV1FeedConfig(kind = browseFetchFilters.v1Feed) {
+        if (kind === 'videos') {
+            return { key: 'videos', path: '/backend/feed/videos?limit=24', label: 'Sora 1 Videos', capturedPath: '/explore/videos' };
+        }
+        if (kind === 'images') {
+            return { key: 'images', path: '/backend/feed/images?limit=24', label: 'Sora 1 Images', capturedPath: '/explore/images' };
+        }
+        return { key: 'home', path: '/backend/feed/home?limit=24', label: 'Sora 1 Explore', capturedPath: '/explore' };
+    }
+
+    function discoverFeedLabel() {
+        if (browseFetchFilters.version === 'v1') return discoverV1FeedConfig().label;
+        return browseFetchFilters.feed === 'top' ? 'Sora 2 Top' : 'Sora 2 Explore';
+    }
+
+    function discoverIngestFeedPayload(data, urlPath, sourceOverride = null) {
         const candidates = [];
         if (Array.isArray(data?.items)) candidates.push(...data.items);
         if (Array.isArray(data?.data)) candidates.push(...data.data);
@@ -1588,7 +1697,16 @@
         if (Array.isArray(data?.generations)) candidates.push(...data.generations);
         candidates.forEach(raw => {
             const entry = normaliseOpportunisticItem(raw);
-            if (entry) maybeEnqueueBrowseFetch(entry, urlPath);
+            if (entry) {
+                if (sourceOverride) entry.source = sourceOverride;
+                else if (browseFetchMode === 'discover') {
+                    if (entry.mode === 'v1') entry.source = `v1_discover_${discoverV1FeedConfig().key}`;
+                    if (entry.mode === 'v2') entry.source = browseFetchFilters.feed === 'top'
+                        ? 'v2_discover_top'
+                        : 'v2_discover_explore';
+                }
+                maybeEnqueueBrowseFetch(entry, urlPath);
+            }
         });
         discoverExtractCreators(data);
     }
@@ -1625,11 +1743,12 @@
         const top = feed === 'top';
         const v = browseFetchFilters.version;
         if (v === 'v1') {
+            const cfg = discoverV1FeedConfig();
             return [{
-                path: '/backend/feed/home?limit=24',
+                path: cfg.path,
                 cursorParam: 'after',
-                label: 'Sora 1 Explore',
-                capturedPath: '/explore',
+                label: cfg.label,
+                capturedPath: cfg.capturedPath,
             }];
         }
         if (top) {
@@ -1638,13 +1757,13 @@
                     path: '/backend/project_y/feed?limit=8&cut=top',
                     cursorParam: 'cursor',
                     label: 'Sora 2 Top cut=top',
-                    capturedPath: '/explore?feed=top',
+                    capturedPath: '/explore/top',
                 },
                 {
                     path: '/backend/project_y/feed?limit=8&cut=nf2&feed=top',
                     cursorParam: 'cursor',
                     label: 'Sora 2 Top feed=top',
-                    capturedPath: '/explore?feed=top',
+                    capturedPath: '/explore/top',
                 },
             ];
         }
@@ -1661,20 +1780,31 @@
         for (const endpoint of discoverFeedEndpoints()) {
             if (stopRequested || !discoverRunning || token !== discoverRunToken) break;
             const base = `${location.origin}${endpoint.path}`;
+            const referrerPath = endpoint.capturedPath || topPathForDiscover();
             let cursor = null;
             for (let page = 0; page < 20 && !stopRequested && discoverRunning && token === discoverRunToken; page++) {
                 const sep = base.includes('?') ? '&' : '?';
                 const cursorParam = endpoint.cursorParam || 'cursor';
                 const url = cursor ? `${base}${sep}${cursorParam}=${encodeURIComponent(cursor)}` : base;
+                discoverStats.current = `${endpoint.label} page ${page + 1}`;
+                discoverStats.lastEvent = cursor ? 'fetching next feed page' : 'fetching feed';
+                updateMirrorRunningStats();
                 let r;
                 try {
-                    r = await _fetch(url, { credentials: 'include', headers: buildHeaders() });
+                    r = await _fetch(url, {
+                        credentials: 'include',
+                        headers: buildHeaders(),
+                        referrer: `${location.origin}${referrerPath}`,
+                    });
                 } catch(e) {
                     log(`Discover probe ${endpoint.label}: network error ${e.message}`);
                     break;
                 }
                 if (!r.ok) {
                     log(`Discover probe ${endpoint.label}: HTTP ${r.status}`);
+                    if (r.status === 400 && !storedV2Headers['openai-sentinel-token']) {
+                        log('Discover: Sora 1 feed may need Sora sentinel headers. Open the matching Explore feed once, then start Discover again.');
+                    }
                     break;
                 }
                 let data;
@@ -1684,7 +1814,7 @@
                 discoverStats.pages++;
                 const beforeCreators = discoverStats.creatorsFound;
                 const beforeCaptured = browseFetchStats.captured;
-                discoverIngestFeedPayload(data, endpoint.capturedPath || topPathForDiscover());
+                discoverIngestFeedPayload(data, referrerPath);
                 if (discoverStats.creatorsFound > beforeCreators || browseFetchStats.captured > beforeCaptured) anyUseful = true;
                 cursor = discoverReadCursor(data, endpoint);
                 updateMirrorRunningStats();
@@ -1700,10 +1830,12 @@
     }
 
     function topPathForDiscover() {
-        return browseFetchFilters.feed === 'top' ? '/explore?feed=top' : '/explore';
+        if (browseFetchFilters.version === 'v1') return discoverV1FeedConfig().capturedPath;
+        return browseFetchFilters.feed === 'top' ? '/explore/top' : '/explore';
     }
 
     async function resolveDiscoverCreator(profile) {
+        if (browseFetchFilters.version === 'v1') return profile?.userId || profile?.username ? profile : null;
         if (profile.userId && profile.username) return profile;
         if (!profile.username) return profile.userId ? profile : null;
         try {
@@ -1722,10 +1854,55 @@
         }
     }
 
+    async function discoverFetchV1Creator(profile) {
+        const c = await resolveDiscoverCreator(profile);
+        const userId = c?.userId || c?.username || null;
+        if (!userId) return false;
+        const username = c.username || userId;
+        discoverStats.currentCreator = username;
+        discoverStats.current = `creator ${username}`;
+        discoverStats.lastEvent = 'fetching Sora 1 creator library';
+        updateMirrorRunningStats();
+        let r;
+        try {
+            r = await _fetch(`${location.origin}/backend/search`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: buildHeaders({ 'content-type': 'application/json' }),
+                body: JSON.stringify({ user_id: userId, query: '' }),
+            });
+        } catch (e) {
+            log(`Discover: Sora 1 creator ${username} search failed - ${e.message}`);
+            return false;
+        }
+        if (!r.ok) {
+            log(`Discover: Sora 1 creator ${username} search HTTP ${r.status}`);
+            return false;
+        }
+        let data;
+        try { data = await r.json(); }
+        catch (e) {
+            log(`Discover: Sora 1 creator ${username} search JSON parse failed`);
+            return false;
+        }
+        const before = discoverStats.mediaQueued;
+        discoverIngestFeedPayload(data, `/profile/${username}`, 'v1_discover_creator');
+        const st = discoverCreatorStats.get(sanitiseSegment(username)) || discoverCreatorStats.get(username);
+        const found = st ? st.queued : (discoverStats.mediaQueued - before);
+        discoverStats.lastEvent = `creator ${username}: ${found} queued`;
+        log(`Discover: Sora 1 creator ${username} fetched (${found} queued)`);
+        return true;
+    }
+
     async function discoverFetchCreator(profile) {
+        if (browseFetchFilters.version === 'v1') return discoverFetchV1Creator(profile);
         const c = await resolveDiscoverCreator(profile);
         if (!c?.userId) return false;
         const username = c.username || c.userId;
+        discoverStats.currentCreator = username;
+        discoverStats.current = `creator ${username}`;
+        discoverStats.lastEvent = 'fetching Sora 2 creator videos';
+        updateMirrorRunningStats();
         await fetchAllV2(
             `/backend/project_y/profile_feed/${encodeURIComponent(c.userId)}?limit=8&cut=nf2`,
             'v2_creator', username, { quiet: true, silent: true, capturedPath: `/profile/${username}` }
@@ -1735,6 +1912,9 @@
                 const chId = getCharacterId(ch);
                 const chUsername = ch?.username ?? 'unknown';
                 if (!chId || !chId.startsWith('ch_')) return;
+                discoverStats.current = `creator ${username} / ${chUsername}`;
+                discoverStats.lastEvent = 'fetching character videos';
+                updateMirrorRunningStats();
                 await fetchAllV2(
                     `/backend/project_y/profile_feed/${encodeURIComponent(chId)}?limit=8&cut=nf2`,
                     'v2_creator', username, { quiet: true, silent: true, capturedPath: `/profile/${username}/characters/${chUsername}` }
@@ -1746,6 +1926,8 @@
                 log(`Discover: ${username} -> character ${chUsername}`);
             });
         }
+        const st = discoverCreatorStats.get(sanitiseSegment(username)) || discoverCreatorStats.get(username);
+        if (st) discoverStats.lastEvent = `creator ${username}: ${st.queued} queued, ${st.filtered} filtered`;
         return true;
     }
 
@@ -1755,6 +1937,10 @@
             while (discoverRunning && !stopRequested && token === discoverRunToken) {
                 const creator = discoverCreatorQueue.shift();
                 if (!creator) return;
+                discoverStats.currentCreator = creator.username || creator.userId || 'unknown';
+                discoverStats.current = `queued creator ${discoverStats.currentCreator}`;
+                discoverStats.lastEvent = `${discoverCreatorQueue.length} creators left in queue`;
+                updateMirrorRunningStats();
                 try {
                     const ok = await discoverFetchCreator(creator);
                     if (ok) discoverStats.creatorsDone++;
@@ -1792,7 +1978,7 @@
             browseFetchFilters.version = 'v2';
             log('Discover: Top feed is Sora 2 only; using Sora 2.');
         }
-        log(`Discover: ${browseFetchFilters.feed === 'top' ? 'Top' : 'Explore'} feed started.`);
+        log(`Discover: ${discoverFeedLabel()} feed started.`);
         while (discoverRunning && !stopRequested && token === discoverRunToken) {
             const ok = await discoverFetchFeedOnce(token);
             await discoverDrainCreatorQueue(token);
@@ -2622,6 +2808,7 @@
         const failed = document.getElementById('sdl-mirror-failed');
         const folder = document.getElementById('sdl-mirror-folder');
         const filtersEl = document.getElementById('sdl-mirror-filters');
+        const discoverDetail = document.getElementById('sdl-discover-detail');
         const isDiscover = browseFetchMode === 'discover';
         const liveText = document.getElementById('sdl-mirror-live-text');
         const countLabel = document.getElementById('sdl-mirror-count-label');
@@ -2629,7 +2816,7 @@
         if (saved) saved.textContent = browseFetchManifest.size.toLocaleString();
         if (countLabel) countLabel.textContent = isDiscover ? 'discover items saved' : 'mirror items saved';
         if (liveText) liveText.textContent = isDiscover
-            ? `Discovering creators (${discoverStats.creatorsDone}/${discoverStats.creatorsFound})`
+            ? (discoverStats.current || `Discovering creators (${discoverStats.creatorsDone}/${discoverStats.creatorsFound})`)
             : 'Mirror Mode is watching your Sora browsing';
         if (stopBtn) stopBtn.textContent = isDiscover ? 'Stop Discover & Download' : 'Stop Mirror Mode';
         const mirrorMaxWrap = document.getElementById('sdl-mirror-maxlikes-wrap');
@@ -2646,6 +2833,39 @@
         if (queued) queued.textContent = browseFetchQueue.length.toLocaleString();
         if (failed) failed.textContent = browseFetchStats.failed.toLocaleString();
         if (folder) folder.textContent = browseFetchBaseDir ? `${browseFetchBaseDir.name}/${getBrowseFetchRootName()}/` : '(no folder picked)';
+        if (discoverDetail) {
+            discoverDetail.style.display = isDiscover ? '' : 'none';
+            if (isDiscover) {
+                const avgScreened = discoverStats.creatorsDone > 0
+                    ? (discoverStats.creatorItems / discoverStats.creatorsDone).toFixed(1)
+                    : '0';
+                const creatorQueuedTotal = [...discoverCreatorStats.values()].reduce((n, st) => n + st.queued, 0);
+                const avgQueued = discoverStats.creatorsDone > 0
+                    ? (creatorQueuedTotal / discoverStats.creatorsDone).toFixed(1)
+                    : '0';
+                const activeCreators = discoverStats.currentCreator || 'feed';
+                const knownOrDupes = discoverStats.mediaKnown + discoverStats.mediaDuplicate;
+                const recentCreators = [...discoverCreatorStats.entries()].slice(-3)
+                    .map(([name, st]) => `${name}: ${st.queued}/${st.screened} queued, ${st.filtered} filtered`)
+                    .join(' · ') || 'none yet';
+                const rows = [
+                    ['Current', discoverStats.current || 'Idle'],
+                    ['Last event', discoverStats.lastEvent || 'waiting'],
+                    ['Creators', `${discoverStats.creatorsDone}/${discoverStats.creatorsFound} done · ${discoverCreatorQueue.length} queued · ${discoverStats.creatorErrors} errors`],
+                    ['Media queue', `${browseFetchQueue.length} queued · ${browseFetchWorkersActive} workers · ${discoverStats.videosQueued} videos · ${discoverStats.imagesQueued} images`],
+                    ['Screened', `${discoverStats.mediaScreened} total · ${discoverStats.feedItems} feed · ${discoverStats.creatorItems} creator`],
+                    ['Matched', `${discoverStats.mediaQueued} queued · ${browseFetchManifest.size} saved · ${browseFetchStats.failed} failed`],
+                    ['Filtered', `${discoverStats.mediaFiltered} by filters · ${knownOrDupes} known/duplicate · ${discoverStats.mediaDropped} dropped`],
+                    ['Averages', `${avgScreened} screened/creator · ${avgQueued} queued/creator · ${discoverStats.creatorsWithMedia} creators with media`],
+                    ['Active creator', activeCreators],
+                    ['Recent creators', recentCreators],
+                ];
+                const esc = s => String(s).replace(/[&<>"']/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[ch]));
+                discoverDetail.innerHTML = rows.map(([k, v]) =>
+                    `<div class="sdl-discover-stat-row"><span>${esc(k)}</span><strong>${esc(v)}</strong></div>`
+                ).join('');
+            }
+        }
         if (filtersEl) {
             const parts = [];
             if (browseFetchFilters.minLikes > 0) parts.push(`min likes ${browseFetchFilters.minLikes}`);
@@ -2654,11 +2874,12 @@
             if (browseFetchFilters.exclude.length) parts.push(`exclude: ${browseFetchFilters.exclude.join(', ')}`);
             if (browseFetchMode === 'discover') {
                 parts.push(browseFetchFilters.version === 'v1' ? 'Sora 1' : 'Sora 2');
-                parts.push(browseFetchFilters.feed === 'top' ? 'Top feed' : 'Explore feed');
+                if (browseFetchFilters.version === 'v1') parts.push(discoverV1FeedConfig().label.replace(/^Sora 1\s*/, ''));
+                else parts.push(browseFetchFilters.feed === 'top' ? 'Top only' : 'Explore');
                 if (browseFetchFilters.dateFrom) parts.push(`from ${browseFetchFilters.dateFrom}`);
                 if (browseFetchFilters.dateTo) parts.push(`to ${browseFetchFilters.dateTo}`);
                 if (browseFetchFilters.ratios.size) parts.push(`ratio ${[...browseFetchFilters.ratios].join(', ')}`);
-                parts.push(browseFetchFilters.includeChars ? 'characters on' : 'characters off');
+                if (browseFetchFilters.version === 'v2') parts.push(browseFetchFilters.includeChars ? 'characters on' : 'characters off');
             }
             parts.push(browseFetchFilters.saveTxt ? 'prompts on' : 'prompts off');
             filtersEl.textContent = parts.join(' · ');
@@ -3859,6 +4080,17 @@
   color:rgba(255,255,255,0.88); font-size:13px; font-weight:700;
   text-align:right; word-break:break-word;
 }
+.sdl-discover-detail { border-bottom:0.5px solid rgba(255,255,255,0.075); background:rgba(5,10,18,0.2); }
+.sdl-discover-stat-row {
+  display:flex; align-items:flex-start; justify-content:space-between; gap:10px;
+  padding:8px 14px; border-bottom:0.5px solid rgba(255,255,255,0.055);
+  font-size:11px; color:rgba(255,255,255,0.46);
+}
+.sdl-discover-stat-row:last-child { border-bottom:none; }
+.sdl-discover-stat-row strong {
+  color:rgba(226,232,240,0.9); font-size:11.5px; font-weight:650;
+  text-align:right; max-width:62%; overflow-wrap:anywhere;
+}
 .sdl-mirror-filters { padding:11px 14px; font-size:12px; line-height:1.45; color:rgba(147,197,253,0.88); background:rgba(59,130,246,0.08); }
 .sdl-mirror-hero {
   padding:16px 18px 14px; border-radius:12px; margin-bottom:14px;
@@ -3930,6 +4162,18 @@ select.sdl-bf-input { min-height:28px; resize:none; }
 .sdl-bf-input-num { width:70px; }
 .sdl-bf-hint { font-size:9.5px; color:rgba(255,255,255,0.25); margin-top:6px; line-height:1.4; }
 .sdl-bf-hint code { font-family:monospace; color:rgba(147,197,253,0.7); }
+.sdl-segment {
+  display:flex; gap:2px; width:100%; margin-top:3px; padding:2px;
+  background:rgba(255,255,255,0.04); border:0.5px solid rgba(255,255,255,0.1);
+  border-radius:6px; box-sizing:border-box;
+}
+.sdl-seg-btn {
+  flex:1; min-width:0; height:24px; border:0; border-radius:4px;
+  background:transparent; color:rgba(255,255,255,0.56); font:inherit; font-size:10.5px;
+  cursor:pointer; white-space:nowrap;
+}
+.sdl-seg-btn.active { background:rgba(147,197,253,0.18); color:rgba(255,255,255,0.92); }
+.sdl-seg-btn:disabled { opacity:0.36; cursor:not-allowed; }
 .sdl-mirror-filter-controls {
   padding:12px 14px 6px; border-bottom:0.5px solid rgba(255,255,255,0.075);
   background:rgba(255,255,255,0.025);
@@ -4740,11 +4984,15 @@ select.sdl-bf-input { min-height:28px; resize:none; }
               <option value="v2" selected>Sora 2</option>
             </select>
           </label>
-          <label class="sdl-bf-lbl">Feed
-            <select id="sdl-discover-feed" class="sdl-bf-input">
-              <option value="explore">Explore</option>
-              <option value="top">Top (Sora 2)</option>
-            </select>
+          <label class="sdl-bf-lbl" id="sdl-discover-v1feed-wrap">Sora 1 feed
+            <span class="sdl-segment" id="sdl-discover-v1feed">
+              <button type="button" class="sdl-seg-btn active" data-v1feed="home">Explore</button>
+              <button type="button" class="sdl-seg-btn" data-v1feed="videos">Videos</button>
+              <button type="button" class="sdl-seg-btn" data-v1feed="images">Images</button>
+            </span>
+          </label>
+          <label class="sdl-bf-lbl sdl-bf-lbl-inline" id="sdl-discover-toponly-wrap">Top only
+            <input type="checkbox" id="sdl-discover-toponly">
           </label>
         </div>
         <div class="sdl-bf-row">
@@ -4776,7 +5024,7 @@ select.sdl-bf-input { min-height:28px; resize:none; }
           <input id="sdl-discover-ratios" class="sdl-bf-input" placeholder="e.g. 16:9, 9:16">
         </label>
         <div class="sdl-bf-row">
-          <label class="sdl-bf-lbl sdl-bf-lbl-inline">Include creator characters
+          <label class="sdl-bf-lbl sdl-bf-lbl-inline" id="sdl-discover-chars-wrap">Include creator characters
             <input type="checkbox" id="sdl-discover-chars" checked>
           </label>
           <label class="sdl-bf-lbl sdl-bf-lbl-inline">Keep polling
@@ -4831,6 +5079,7 @@ select.sdl-bf-input { min-height:28px; resize:none; }
       <div class="sdl-mirror-row"><span>Captured</span><strong id="sdl-mirror-captured">0</strong></div>
       <div class="sdl-mirror-row"><span>Queued</span><strong id="sdl-mirror-queued">0</strong></div>
       <div class="sdl-mirror-row"><span>Failed</span><strong id="sdl-mirror-failed">0</strong></div>
+      <div class="sdl-discover-detail" id="sdl-discover-detail" style="display:none;"></div>
       <div class="sdl-mirror-filter-controls">
         <div class="sdl-bf-row">
           <label class="sdl-bf-lbl">Min likes
@@ -5305,7 +5554,10 @@ select.sdl-bf-input { min-height:28px; resize:none; }
         const discoverFolder = document.getElementById('sdl-discover-folder');
         const discoverPick = document.getElementById('sdl-discover-pick');
         const discoverVersion = document.getElementById('sdl-discover-version');
-        const discoverFeed = document.getElementById('sdl-discover-feed');
+        const discoverV1FeedWrap = document.getElementById('sdl-discover-v1feed-wrap');
+        const discoverV1FeedButtons = [...document.querySelectorAll('#sdl-discover-v1feed [data-v1feed]')];
+        const discoverTopOnlyWrap = document.getElementById('sdl-discover-toponly-wrap');
+        const discoverTopOnly = document.getElementById('sdl-discover-toponly');
         const discoverMinLikes = document.getElementById('sdl-discover-minlikes');
         const discoverMaxLikes = document.getElementById('sdl-discover-maxlikes');
         const discoverMaxCreators = document.getElementById('sdl-discover-maxcreators');
@@ -5314,9 +5566,11 @@ select.sdl-bf-input { min-height:28px; resize:none; }
         const discoverDateFrom = document.getElementById('sdl-discover-datefrom');
         const discoverDateTo = document.getElementById('sdl-discover-dateto');
         const discoverRatios = document.getElementById('sdl-discover-ratios');
+        const discoverCharsWrap = document.getElementById('sdl-discover-chars-wrap');
         const discoverChars = document.getElementById('sdl-discover-chars');
         const discoverPoll = document.getElementById('sdl-discover-poll');
         const discoverSaveTxt = document.getElementById('sdl-discover-savetxt');
+        let selectedDiscoverV1Feed = browseFetchFilters.v1Feed || 'home';
 
         const parseTerms = v => (v || '').split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
         const parseRatios = v => new Set(parseTerms(v).filter(t => /^\d+:\d+$/.test(t)));
@@ -5357,6 +5611,7 @@ select.sdl-bf-input { min-height:28px; resize:none; }
             browseFetchFilters.saveTxt  = bfSaveTxt.checked;
             browseFetchFilters.version = 'all';
             browseFetchFilters.feed = 'explore';
+            browseFetchFilters.v1Feed = 'home';
             browseFetchFilters.dateFrom = '';
             browseFetchFilters.dateTo = '';
             browseFetchFilters.ratios = new Set();
@@ -5373,9 +5628,15 @@ select.sdl-bf-input { min-height:28px; resize:none; }
         mirrorExclude.addEventListener('input',  () => syncBfFilters('mirror'));
         syncBfFilterControls();
 
+        const renderDiscoverV1FeedButtons = () => {
+            discoverV1FeedButtons.forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.v1feed === selectedDiscoverV1Feed);
+            });
+        };
         const syncDiscoverFilters = () => {
             browseFetchFilters.version = discoverVersion.value || 'v2';
-            browseFetchFilters.feed = discoverFeed.value || 'explore';
+            browseFetchFilters.v1Feed = selectedDiscoverV1Feed;
+            browseFetchFilters.feed = browseFetchFilters.version === 'v2' && discoverTopOnly.checked ? 'top' : 'explore';
             browseFetchFilters.minLikes = Math.max(0, parseInt(discoverMinLikes.value) || 0);
             const maxLikes = parseInt(discoverMaxLikes.value);
             browseFetchFilters.maxLikes = Number.isFinite(maxLikes) && maxLikes >= 0 ? maxLikes : null;
@@ -5385,22 +5646,27 @@ select.sdl-bf-input { min-height:28px; resize:none; }
             browseFetchFilters.dateFrom = discoverDateFrom.value || '';
             browseFetchFilters.dateTo = discoverDateTo.value || '';
             browseFetchFilters.ratios = parseRatios(discoverRatios.value);
-            browseFetchFilters.includeChars = discoverChars.checked;
+            browseFetchFilters.includeChars = browseFetchFilters.version === 'v2' && discoverChars.checked;
             browseFetchFilters.keepPolling = discoverPoll.checked;
             browseFetchFilters.saveTxt = discoverSaveTxt.checked;
-            if (browseFetchFilters.version === 'v1' && browseFetchFilters.feed === 'top') {
-                browseFetchFilters.feed = 'explore';
-                discoverFeed.value = 'explore';
-            }
+            if (browseFetchFilters.version === 'v1') discoverTopOnly.checked = false;
+            if (discoverV1FeedWrap) discoverV1FeedWrap.style.display = browseFetchFilters.version === 'v1' ? '' : 'none';
+            if (discoverTopOnlyWrap) discoverTopOnlyWrap.style.display = browseFetchFilters.version === 'v2' ? '' : 'none';
+            if (discoverCharsWrap) discoverCharsWrap.style.display = browseFetchFilters.version === 'v2' ? '' : 'none';
+            renderDiscoverV1FeedButtons();
             setIfDifferent(mirrorMinLikes, String(browseFetchFilters.minLikes || 0));
             setIfDifferent(mirrorMaxLikes, browseFetchFilters.maxLikes == null ? '' : String(browseFetchFilters.maxLikes));
             updateMirrorRunningStats();
         };
         [
-            discoverVersion, discoverFeed, discoverMinLikes, discoverMaxLikes, discoverMaxCreators,
+            discoverVersion, discoverTopOnly, discoverMinLikes, discoverMaxLikes, discoverMaxCreators,
             discoverInclude, discoverExclude, discoverDateFrom, discoverDateTo, discoverRatios,
             discoverChars, discoverPoll, discoverSaveTxt,
         ].forEach(el => el.addEventListener(el.type === 'checkbox' || el.tagName === 'SELECT' ? 'change' : 'input', syncDiscoverFilters));
+        discoverV1FeedButtons.forEach(btn => btn.addEventListener('click', () => {
+            selectedDiscoverV1Feed = btn.dataset.v1feed || 'home';
+            syncDiscoverFilters();
+        }));
         syncDiscoverFilters();
 
         bfPick.addEventListener('click', async () => {

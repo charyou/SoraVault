@@ -544,26 +544,42 @@ Known current status:
 
 Open tasks for the next session:
 
-- Reimplement Sora 1 Discover fetching:
-  - Use `/backend/feed/home?limit=24`.
-  - Paginate using `after=<last_id>` while `has_more === true`.
-  - Parse `data[]` items directly.
-  - Prefer `encodings.source.path` for download URL, then fallback to
-    `downloadable_url`, `download_urls.watermark`, then `url`.
-  - Set `mode: 'v1'`, source such as `v1_discover`, `genId: id`,
-    `taskId: task_id`, `date: created_at.slice(0, 10)`, prompt, width, height,
-    ratio, quality, operation, model, seed, `likeCount`, author from
-    `user.username`, and `isVideo` from `task_type`/`n_frames`/URL extension.
-  - Ensure `getFileExt()` labels Sora 1 Explore videos as `.mp4`.
-  - Decide folder behavior, likely `discover_download/sora1_explore/`.
+Completed in follow-up:
+
+- Sora 1 Discover feed selection is now explicit:
+  - Explore/default uses `/backend/feed/home?limit=24`.
+  - Videos only uses `/backend/feed/videos?limit=24`.
+  - Images only uses `/backend/feed/images?limit=24`.
+  - The selected media type is enforced in Browse&Fetch filters so Sora 1
+    videos-only and images-only runs do not save the wrong type.
+- Sora 1 feed rows are parsed through the opportunistic generation normalizer,
+  which already prefers `encodings.source.path`, then `downloadable_url`,
+  `download_urls.watermark`, and finally the display `url`/download fallback.
+- Sora 1 creator discovery is enabled for Discover & Download:
+  - Feed `user` objects are queued as creators.
+  - Creator libraries are fetched via `POST /backend/search` with
+    `{ "user_id": "<id-or-username>", "query": "" }`.
+  - Sora 1 creators use source `v1_discover_creator` and Sora 1 folder paths.
+- The Discover card now uses Sora-version-specific controls:
+  - Sora 1 shows Explore / Videos / Images segmented buttons.
+  - Sora 2 shows an Explore default with a Top-only checkbox.
+  - Sora 2-only character crawling controls are hidden for Sora 1.
+- Discover running view now exposes live background activity:
+  - Current feed/creator/character operation.
+  - Creator queue, media queue, workers, feed pages, screened/matched/filtered
+    counts, known/duplicate counts, and recent per-creator queued/filtered
+    summaries.
+  - Aggregates include average screened/queued media per completed creator.
+- Sora 1 direct feed probes now preserve backend auth/runtime headers from all
+  `/backend/` traffic, including the Sora sentinel header, not only
+  `/backend/project_y/`. Feed probes also set a matching referrer for
+  `/explore`, `/explore/images`, and `/explore/videos`.
+
+Open tasks for the next session:
+
 - Verify and lock down the Sora 2 Top endpoint:
   - Capture exact DevTools request when opening `https://sora.chatgpt.com/explore?feed=top`.
   - Replace the two guessed Top probes with the exact endpoint and params.
-- Convert Explore/Top from dropdown to button/toggle:
-  - Use a segmented control: `Explore` and `Top`.
-  - `Explore` available for Sora 1 and Sora 2.
-  - `Top` enabled only when Sora 2 is selected.
-  - When Sora 1 is selected, grey out Top and force Explore.
 - Clean up Discover filter UX:
   - Keep full filters on the Discover start card.
   - Running view should either be read-only summary or allow only min/max likes.
