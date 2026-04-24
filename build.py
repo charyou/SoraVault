@@ -20,5 +20,6 @@ shutil.copy(f'{SRC}/core.js', f'{CHROME}/content.js')
 for f in ['manifest.json', 'background.js', 'bridge.js']:
     shutil.copy(f'{SRC}/chrome/{f}', f'{CHROME}/{f}')
 shutil.copytree(f'{SRC}/chrome/assets', f'{CHROME}/assets', dirs_exist_ok=True)
+shutil.copytree(f'{SRC}/img', f'{CHROME}/img', dirs_exist_ok=True)
 
 print('Built: dist/SoraVault.user.js + dist/chrome-extension/')

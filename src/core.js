@@ -38,13 +38,24 @@
         isTM:  typeof GM_download === 'function',
         win:   typeof unsafeWindow !== 'undefined' ? unsafeWindow : window,
         hasGM: typeof GM_download === 'function',
-        LOGO_URL: (() => {
+        EXT_BASE: (() => {
             const meta = document.querySelector('meta[name="soravault-ext-base"]');
-            return meta?.content
-                ? meta.content + 'assets/soravault-logo-square.png'
-                : 'https://raw.githubusercontent.com/charyou/SoraVault/main/assets/soravault-logo-square.png';
+            return meta?.content || '';
         })(),
     };
+    const GITHUB_RAW_BASE = 'https://raw.githubusercontent.com/charyou/SoraVault/main/';
+    function assetUrl(path) {
+        return ENV.EXT_BASE ? ENV.EXT_BASE + path : GITHUB_RAW_BASE + path;
+    }
+    function githubAssetUrl(path) {
+        return GITHUB_RAW_BASE + path;
+    }
+    ENV.LOGO_URL = assetUrl('img/soravault-logo-square.png');
+    ENV.LOGO_FALLBACK_URL = githubAssetUrl('img/soravault-logo-square.png');
+    ENV.COFFEE_BIG_URL = assetUrl('img/coffeemug_big.png');
+    ENV.COFFEE_BIG_FALLBACK_URL = githubAssetUrl('img/coffeemug_big.png');
+    ENV.COFFEE_SMALL_URL = assetUrl('img/coffeemug_small.png');
+    ENV.COFFEE_SMALL_FALLBACK_URL = githubAssetUrl('img/coffeemug_small.png');
 
     // =====================================================================
     // CONFIG & RELEASE INFO
@@ -136,7 +147,8 @@
 
     const SPEED_PRESETS = [
         { workers: 2, delay:  60 },
-        { workers: 4, delay: 150 },
+        { workers: 4, delay: 120 },
+        { workers: 6, delay:  90 },
         { workers: 8, delay:  60 },
     ];
 
@@ -191,6 +203,7 @@
     let pauseGate          = Promise.resolve();
     let pauseResolver      = null;
     let downloadWorkerRetune = null;
+    let activeDownloadWorkerCount = 0;
 
     // Watermark proxy state
     let watermarkRemovalEnabled        = true;
@@ -227,7 +240,7 @@
     const creators = [];  // Array<{ username, userId, state: 'checking'|'valid'|'invalid'|'error', postCount, characterCount, error? }>
 
     // Source enable/disable state — all enabled by default except preview sources
-    const enabledSources = new Set(SCAN_SOURCES.filter(s => s.id !== 'v2_my_characters').map(s => s.id));
+    const enabledSources = new Set(SCAN_SOURCES.map(s => s.id));
 
     // Per-source scan status
     const srcStatus = {};
@@ -1585,7 +1598,7 @@
             items,
         };
         const json     = JSON.stringify(payload, null, 2);
-        const filename = `soravault_manifest_${new Date().toISOString().slice(0, 10)}.json`;
+        const filename = `soravault_manifest_${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.json`;
         const blob     = new Blob([json], { type: 'application/json;charset=utf-8' });
 
         if (baseDir) {
@@ -1933,7 +1946,7 @@
         let lastError = null;
 
         for (let attempt = 1; attempt <= WATERMARK_FETCH_MAX_ATTEMPTS; attempt++) {
-            setPhase?.(attempt === 1 ? 'Removing watermark via soravdl.com…' : `Removing watermark via soravdl.com (retry ${attempt})…`);
+            setPhase?.(attempt === 1 ? 'Removing watermark via soravdl.com' : `Removing watermark via soravdl.com (retry ${attempt})`);
             const cooldownMs = globalRateLimitCooldownUntilMs - Date.now();
             if (cooldownMs > 0) await sleep(cooldownMs);
 
@@ -1958,7 +1971,7 @@
                 globalRateLimitCooldownUntilMs = Date.now() + retryMs;
                 lastError = new Error(`Proxy rate limited (${response.status})`);
                 if (attempt >= WATERMARK_FETCH_MAX_ATTEMPTS) break;
-                setPhase?.(`Proxy rate-limited — waiting ${Math.round(retryMs / 1000)}s…`);
+                setPhase?.(`Watermark proxy rate-limited - waiting ${Math.round(retryMs / 1000)}s`);
                 log(`Proxy rate limited for ${videoId}; retrying in ${retryMs} ms`);
                 await sleep(retryMs);
                 continue;
@@ -2001,8 +2014,7 @@
     }
 
     async function downloadWithCurrentSolution(url, filename, item, dir, setPhase) {
-        const lbl = SCAN_SOURCES.find(s => s.id === item.sourceId)?.label ?? '';
-        setPhase?.(`⬇ ${lbl}`);
+        setPhase?.(`Downloading ${getSourceLabel(item)}`);
         if (dlMethod === 'fs') return downloadFileFS(url, filename, dir);
         return downloadFileGM(url, getSubfolderName(item), filename);
     }
@@ -2014,7 +2026,8 @@
 
         const videoId = getWatermarkProxyVideoId(item, url);
         try {
-            const blob = await fetchWatermarkFreeVideoBlob(item, url, setPhase);
+            const proxyPhase = phrase => setPhase?.(`${phrase} · ${getSourceLabel(item)}`);
+            const blob = await fetchWatermarkFreeVideoBlob(item, url, proxyPhase);
             log(`Proxy download succeeded: ${videoId}`);
             if (dlMethod === 'fs') return saveBlobFS(blob, filename, dir);
             return downloadBlobGM(blob, getSubfolderName(item), filename);
@@ -2022,8 +2035,7 @@
             watermarkProxyFailureCount++;
             const message = e instanceof Error ? e.message : String(e);
             const is408 = message.includes('408');
-            const srcLabel = SCAN_SOURCES.find(s => s.id === item.sourceId)?.label ?? '';
-            setPhase?.(`⬇ ${srcLabel} (direct)`);
+            setPhase?.(`Downloading ${getSourceLabel(item)} (direct file)`);
             log(`Proxy failed for ${videoId}: ${message}; falling back to OpenAI download`);
             if (!watermarkProxyDisabled && (is408 || watermarkProxyFailureCount >= WATERMARK_PROXY_FAILURE_LIMIT)) {
                 watermarkProxyDisabled = true;
@@ -2519,6 +2531,7 @@
         isRunning = true; stopRequested = false;
         completedCount = 0; failedCount = 0;
         totalToDownload = items.length;
+        activeDownloadWorkerCount = 0;
         lastSaveTxt    = saveTxt;
         lastSaveMedia  = saveMedia;
         lastSaveJSON   = saveJSON;
@@ -2558,6 +2571,12 @@
         if (totalEl) totalEl.textContent = totalToDownload;
         setState('downloading');
         updateDownloadProgress();
+
+        if (saveJSON) {
+            log('Saving JSON manifest first...');
+            await exportJSON(true);
+            showToast('JSON manifest saved first');
+        }
 
         const subDirCache = {};
         async function getSubDir(item) {
@@ -2624,9 +2643,13 @@
                 activeDownloadWorkers++;
                 worker().finally(() => {
                     activeDownloadWorkers--;
+                    activeDownloadWorkerCount = activeDownloadWorkers;
+                    updateDownloadProgress(dlStart);
                     scheduleDownloadWorkers();
                     maybeResolveDownloadWorkers();
                 });
+                activeDownloadWorkerCount = activeDownloadWorkers;
+                updateDownloadProgress(dlStart);
             }
             maybeResolveDownloadWorkers();
         }
@@ -2648,12 +2671,12 @@
                 const base = buildBase(item);
                 const ext  = getFileExt(item);
 
-                const srcLabel = SCAN_SOURCES.find(s => s.id === item.sourceId)?.label ?? '';
+                const srcLabel = getSourceLabel(item);
                 const setPhase = phrase => {
                     phrase ? workerActivities.set(i, phrase) : workerActivities.delete(i);
                     scheduleActivityRender();
                 };
-                setPhase(`⬇ ${srcLabel}`);
+                setPhase(`Downloading ${srcLabel}`);
 
                 // ── Skip-existing check (FS mode only) ───────────────────────
                 const existingMap = await getExistingMap(item);
@@ -2728,6 +2751,7 @@
         isRunning = false;
         isPaused = false;
         downloadWorkerRetune = null;
+        activeDownloadWorkerCount = 0;
         if (pauseResolver) { pauseResolver(); pauseResolver = null; }
         pauseGate = Promise.resolve();
         workerActivities.clear();
@@ -2743,12 +2767,7 @@
             log(`Stopped — ${completedCount} saved, ${failedCount} failed`);
             setState('ready');
         } else {
-            // Auto-export JSON manifest if enabled
-            if (saveJSON) {
-                log('Saving JSON manifest…');
-                await exportJSON(true);
-                showToast('JSON manifest saved ✓');
-            }
+            if (saveJSON) log('JSON manifest was saved before media downloads started.');
             // Save download log
             const logEl = document.getElementById('sdl-log');
             if (logEl && logEl.textContent.trim()) {
@@ -2951,6 +2970,14 @@
         return 'images';
     }
 
+    function getSourceLabel(item) {
+        const sourceId = item?.source ?? item?.sourceId ?? '';
+        return SOURCE_LABELS[sourceId]
+            || SCAN_SOURCES.find(s => s.id === sourceId)?.label
+            || sourceId
+            || 'items';
+    }
+
     function recomputeSelection() {
         const selected = getFilteredItems().length;
         const total    = collected.size;
@@ -2958,7 +2985,9 @@
         const pill     = document.getElementById('sdl-counter-pill');
         if (pill) {
             const filtered = selected < total;
-            pill.textContent = filtered ? `${selected} / ${total} selected` : `${total} ${word}`;
+            pill.innerHTML = filtered
+                ? `Will download <strong>${selected}</strong> of ${total} ${word}`
+                : `Will download <strong>${total}</strong> ${word}`;
             pill.classList.toggle('filtered', filtered);
             pill.classList.remove('flash'); void pill.offsetWidth; pill.classList.add('flash');
         }
@@ -3042,11 +3071,13 @@
         const dEl   = document.getElementById('sdl-dl-done');
         const fEl   = document.getElementById('sdl-dl-failed');
         const eta   = document.getElementById('sdl-dl-eta');
+        const activeEl = document.getElementById('sdl-dl-active-workers');
         const fWrap = document.getElementById('sdl-fail-wrap');
         if (nEl) nEl.textContent = completedCount;
         if (dEl) dEl.textContent = completedCount;
         if (fEl) { fEl.textContent = failedCount; if (fWrap) fWrap.style.color = failedCount > 0 ? '#f87171' : ''; }
         if (bar && totalToDownload > 0) bar.style.width = (done / totalToDownload * 100) + '%';
+        if (activeEl) activeEl.textContent = activeDownloadWorkerCount;
         if (eta && isPaused) {
             eta.textContent = 'Paused';
         } else if (eta && dlStart && completedCount > 0) {
@@ -3084,8 +3115,13 @@
         speedIdx = Math.max(0, Math.min(SPEED_PRESETS.length - 1, Number.isFinite(n) ? n : 0));
         document.querySelectorAll('.sdl-speed-seg').forEach(el =>
             el.classList.toggle('active', parseInt(el.dataset.spd) === speedIdx));
-        const hints   = ['2 workers · 60 ms delay · safe', '4 workers · 150 ms delay · aggressive', '8 workers · 60 ms delay · temp block possible!'];
-        const classes = ['', 'warn', 'danger'];
+        const hints   = [
+            'Higher speed reduces total time but increases block risk.',
+            'Higher speed reduces total time but increases block risk.',
+            'Higher speed reduces total time but increases block risk.',
+            'Higher speed reduces total time but increases block risk.',
+        ];
+        const classes = ['', '', 'warn', 'danger'];
         document.querySelectorAll('.sdl-speed-hint').forEach(h => {
             h.textContent = hints[speedIdx]; h.className = 'sdl-speed-hint ' + classes[speedIdx];
         });
@@ -3104,7 +3140,7 @@
   width:530px; min-width:300px; max-width:720px;
   max-height:calc(100vh - 32px);
   font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;
-  font-size:13px; color:rgba(255,255,255,0.82);
+  font-size:14px; color:rgba(255,255,255,0.82);
   background:rgba(10,10,10,0.97);
   backdrop-filter:blur(30px); -webkit-backdrop-filter:blur(30px);
   border:0.5px solid rgba(255,255,255,0.1); border-radius:18px;
@@ -3139,7 +3175,7 @@
   background:rgba(255,255,255,0.06); display:none;
   align-items:center; justify-content:center; font-size:16px;
 }
-#sdl-title { font-size:13px; font-weight:600; color:rgba(255,255,255,0.85); flex-shrink:0; }
+#sdl-title { font-size:15px; font-weight:700; color:rgba(255,255,255,0.9); flex-shrink:0; }
 #sdl-update-badge {
   display:none; font-size:9px; padding:2px 6px; border-radius:20px;
   background:rgba(99,102,241,0.25); border:0.5px solid rgba(99,102,241,0.4);
@@ -3455,17 +3491,39 @@
 .sdl-prog-bar.ind { width:45%; background:linear-gradient(90deg,transparent,rgba(255,255,255,0.6),transparent); background-size:200% 100%; animation:sdlShimmer 1.5s infinite; }
 @keyframes sdlShimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
 
+.sdl-progress-card {
+  padding:16px 18px 14px; border-radius:12px; margin-bottom:14px;
+  border:0.5px solid rgba(255,255,255,0.12); background:rgba(15,20,26,0.72);
+}
+.sdl-progress-card .sdl-big-count .n { font-size:45px; font-weight:800; }
+.sdl-progress-card .sdl-big-count .lbl { font-size:13px; letter-spacing:0; color:rgba(255,255,255,0.46); }
+.sdl-progress-card .sdl-prog { height:12px; background:rgba(255,255,255,0.11); margin:0 0 12px; }
+.sdl-progress-card .sdl-prog-bar { background:linear-gradient(90deg,#34d399,#4ade80); }
+.sdl-progress-card .sdl-stats {
+  display:grid; grid-template-columns:repeat(4,1fr); gap:0; margin:12px 0 0;
+  padding-top:12px; border-top:0.5px solid rgba(255,255,255,0.1);
+}
+.sdl-progress-card .sdl-stat {
+  justify-content:center; flex-direction:column; gap:3px; font-size:12px;
+  color:rgba(255,255,255,0.62); border-right:0.5px solid rgba(255,255,255,0.1);
+}
+.sdl-progress-card .sdl-stat:last-child { border-right:none; }
+.sdl-progress-card .sdl-stat-n { display:block; font-size:18px; font-weight:700; color:rgba(255,255,255,0.92); }
+.sdl-stat-icon { color:#34d399; font-size:14px; margin-right:4px; }
+.sdl-stat-icon.err { color:#f87171; }
+.sdl-stat-icon.muted { color:rgba(255,255,255,0.58); }
+
 /* Buttons */
 .sdl-btn {
-  display:block; width:100%; padding:10px 14px; margin-bottom:6px; border:none; border-radius:11px;
-  cursor:pointer; font-size:12.5px; font-weight:500; letter-spacing:0.01em;
+  display:block; width:100%; padding:14px 16px; margin-bottom:8px; border:none; border-radius:12px;
+  cursor:pointer; font-size:16px; font-weight:700; letter-spacing:0.01em;
   text-align:center; -webkit-font-smoothing:antialiased;
   transition:opacity 0.14s,transform 0.1s; position:relative;
 }
 .sdl-btn:not(:disabled):active { transform:scale(0.98); }
 .sdl-btn:disabled { opacity:0.22; cursor:not-allowed; }
-.sdl-btn-primary { background:rgba(255,255,255,0.92); color:#0a0a0a; }
-.sdl-btn-primary:not(:disabled):hover { opacity:0.84; }
+.sdl-btn-primary { background:linear-gradient(135deg,#3b82f6,#3048e6); color:white; box-shadow:0 10px 24px rgba(48,72,230,0.25); }
+.sdl-btn-primary:not(:disabled):hover { opacity:0.9; }
 .sdl-btn-secondary { background:rgba(255,255,255,0.055); color:rgba(255,255,255,0.62); border:0.5px solid rgba(255,255,255,0.09); }
 .sdl-btn-secondary:not(:disabled):hover { background:rgba(255,255,255,0.09); }
 .sdl-btn-stop { background:rgba(248,113,113,0.1); color:#fca5a5; border:0.5px solid rgba(248,113,113,0.18); }
@@ -3488,20 +3546,29 @@
 
 /* Export toggles */
 .sdl-export-toggles {
-  background:rgba(255,255,255,0.025); border:0.5px solid rgba(255,255,255,0.07);
-  border-radius:12px; margin-bottom:12px; overflow:hidden;
+  background:rgba(17,22,28,0.78); border:0.5px solid rgba(255,255,255,0.1);
+  border-radius:12px; margin-bottom:16px; overflow:hidden;
 }
 .sdl-export-row {
-  display:flex; align-items:center; padding:8px 13px;
-  border-bottom:0.5px solid rgba(255,255,255,0.05);
+  display:flex; align-items:center; gap:12px; padding:12px 15px;
+  border-bottom:0.5px solid rgba(255,255,255,0.07);
   transition:background 0.1s;
 }
 .sdl-export-row:last-child { border-bottom:none; }
 .sdl-export-row:hover { background:rgba(255,255,255,0.02); }
-.sdl-export-lbl {
-  font-size:11.5px; color:rgba(255,255,255,0.58); flex:1; cursor:default; line-height:1.3;
+.sdl-export-icon {
+  width:26px; min-width:26px; height:26px; display:flex; align-items:center; justify-content:center;
+  font-size:22px; line-height:1; font-weight:700;
 }
-.sdl-export-lbl span { font-size:10px; color:rgba(255,255,255,0.22); display:block; margin-top:1px; }
+.sdl-export-icon.media { color:#60a5fa; }
+.sdl-export-icon.txt { color:#a78bfa; }
+.sdl-export-icon.json { color:#4ade80; }
+.sdl-export-icon.skip { color:#fb923c; }
+.sdl-export-icon.watermark { color:rgba(255,255,255,0.42); }
+.sdl-export-lbl {
+  font-size:14px; color:rgba(255,255,255,0.88); flex:1; cursor:default; line-height:1.35; font-weight:600;
+}
+.sdl-export-lbl span { font-size:12px; color:rgba(255,255,255,0.42); display:block; margin-top:1px; font-weight:400; }
 
 /* Toggle */
 .sdl-toggle { position:relative; width:32px; height:18px; flex-shrink:0; cursor:pointer; display:block; }
@@ -3511,13 +3578,43 @@
 .sdl-toggle-thumb { position:absolute; top:3px; left:3px; width:12px; height:12px; border-radius:50%; background:rgba(255,255,255,0.9); transition:transform 0.2s; pointer-events:none; }
 .sdl-toggle input:checked ~ .sdl-toggle-thumb { transform:translateX(14px); }
 
-/* Counter pill */
-#sdl-counter-pill {
-  display:block; text-align:center; margin-bottom:10px; font-size:11px; color:rgba(255,255,255,0.28);
-  background:rgba(255,255,255,0.04); border:0.5px solid rgba(255,255,255,0.08);
-  border-radius:9px; padding:7px 10px; transition:background 0.2s,color 0.2s;
+/* Filter summary card */
+.sdl-filter-card {
+  margin-bottom:14px; padding:14px 15px; border-radius:12px;
+  border:0.5px solid rgba(59,130,246,0.75);
+  background:linear-gradient(135deg,rgba(37,99,235,0.14),rgba(20,184,166,0.06));
+  box-shadow:0 0 0 1px rgba(59,130,246,0.14) inset;
 }
-#sdl-counter-pill.filtered { background:rgba(99,102,241,0.12); border-color:rgba(99,102,241,0.3); color:rgba(165,170,255,0.85); }
+.sdl-filter-head {
+  display:flex; align-items:center; gap:8px; margin-bottom:10px;
+}
+.sdl-filter-title {
+  display:flex; align-items:center; gap:8px; flex:1;
+  font-size:13px; color:rgba(255,255,255,0.72); font-weight:800;
+  text-transform:uppercase; letter-spacing:0.04em;
+}
+.sdl-filter-edit {
+  display:inline-flex; align-items:center; gap:8px; padding:7px 10px; border-radius:8px;
+  background:rgba(255,255,255,0.06); border:0.5px solid rgba(255,255,255,0.14);
+  color:rgba(255,255,255,0.78); font-size:12px; font-weight:600; cursor:pointer;
+}
+.sdl-filter-edit:hover { background:rgba(255,255,255,0.1); color:#fff; }
+.sdl-filter-edit .sdl-disc-arrow { font-size:11px; }
+.sdl-filter-edit.open .sdl-disc-arrow { transform:rotate(90deg); }
+.sdl-filter-card .sdl-drawer { margin:0 0 12px; padding-top:10px; border-top:0.5px solid rgba(255,255,255,0.08); }
+#sdl-counter-pill {
+  display:flex; align-items:center; justify-content:center; gap:8px; text-align:center;
+  margin:0; font-size:19px; color:rgba(255,255,255,0.78);
+  background:transparent; border:none; border-radius:0; padding:4px 8px 2px;
+  transition:background 0.2s,color 0.2s; line-height:1.3;
+}
+#sdl-counter-pill::before {
+  content:'◴'; display:inline-flex; align-items:center; justify-content:center;
+  width:34px; height:34px; border-radius:50%;
+  border:5px solid rgba(52,211,153,0.35); color:#fff; font-size:16px;
+}
+#sdl-counter-pill strong { color:#4ade80; font-size:28px; line-height:1; font-weight:800; }
+#sdl-counter-pill.filtered { color:rgba(255,255,255,0.9); }
 #sdl-counter-pill.flash { animation:sdlFlash 0.3s ease; }
 @keyframes sdlFlash { 0%,100%{opacity:1} 50%{opacity:0.55} }
 
@@ -3603,49 +3700,63 @@
 }
 
 /* Speed */
-.sdl-speed { margin:2px 0 10px; }
-.sdl-speed-lbl { font-size:10px; color:rgba(255,255,255,0.2); text-transform:uppercase; letter-spacing:0.07em; margin-bottom:7px; display:block; }
-.sdl-speed-segs { display:flex; gap:5px; margin-bottom:6px; }
+.sdl-speed {
+  margin:0 0 14px; padding:14px 16px 16px; border-radius:12px;
+  border:0.5px solid rgba(255,255,255,0.12); background:rgba(17,22,28,0.72);
+}
+.sdl-speed-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:11px; }
+.sdl-speed-lbl {
+  font-size:13px; color:rgba(255,255,255,0.68); text-transform:uppercase;
+  letter-spacing:0.04em; font-weight:800; display:flex; align-items:center; gap:8px;
+}
+.sdl-speed-workers {
+  color:rgba(255,255,255,0.76); font-size:12px; padding:6px 9px; border-radius:8px;
+  border:0.5px solid rgba(255,255,255,0.1); background:rgba(255,255,255,0.04);
+}
+.sdl-speed-segs { display:grid; grid-template-columns:repeat(4,1fr); gap:0; margin-bottom:12px; border:0.5px solid rgba(255,255,255,0.12); border-radius:9px; overflow:hidden; }
 .sdl-speed-seg {
-  flex:1; display:flex; flex-direction:column; align-items:center; padding:8px 4px;
-  border-radius:10px; background:rgba(255,255,255,0.04); border:0.5px solid rgba(255,255,255,0.08);
+  min-height:60px; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:9px 4px;
+  border-radius:0; background:rgba(255,255,255,0.02); border:0; border-right:0.5px solid rgba(255,255,255,0.09);
   cursor:pointer; transition:all 0.15s; gap:2px; user-select:none;
 }
+.sdl-speed-seg:last-child { border-right:none; }
 .sdl-speed-seg:hover { background:rgba(255,255,255,0.08); }
-.spd-std.active  { background:rgba(52,211,153,0.1);  border-color:rgba(52,211,153,0.3); }
-.spd-fast.active { background:rgba(251,191,36,0.1);  border-color:rgba(251,191,36,0.3); }
-.spd-rip.active  { background:rgba(248,113,113,0.1); border-color:rgba(248,113,113,0.3); }
-.s-icon { font-size:12px; } .s-lbl { font-size:11px; font-weight:500; } .s-risk { font-size:9px; color:rgba(255,255,255,0.28); }
-.sdl-speed-hint { font-size:9.5px; color:rgba(255,255,255,0.22); text-align:center; }
+.sdl-speed-seg.active  { background:rgba(52,211,153,0.12); box-shadow:inset 0 0 0 1px rgba(52,211,153,0.85); color:#fff; }
+.s-icon { display:none; }
+.s-lbl { font-size:14px; font-weight:700; color:rgba(255,255,255,0.86); }
+.s-risk { font-size:12px; color:rgba(255,255,255,0.44); }
+.sdl-speed-hint { font-size:12px; color:rgba(255,255,255,0.42); text-align:center; }
 .sdl-speed-hint.warn   { color:rgba(251,191,36,0.65); }
 .sdl-speed-hint.danger { color:rgba(248,113,113,0.65); }
 
 /* Coffee */
 .sdl-coffee {
-  margin-bottom:12px; padding:13px 12px; border-radius:13px;
-  background:rgba(251,191,36,0.07); border:0.5px solid rgba(251,191,36,0.2);
-  display:flex; flex-direction:column; align-items:center; gap:8px; text-align:center;
+  margin-bottom:16px; padding:24px 28px; border-radius:14px;
+  background:rgba(36,27,11,0.72); border:0.5px solid rgba(251,191,36,0.5);
+  display:grid; grid-template-columns:108px 1fr; align-items:center; gap:20px; text-align:left;
 }
-.sdl-coffee-icon { font-size:22px; line-height:1; }
-.sdl-coffee-msg { font-size:11px; color:rgba(255,255,255,0.55); line-height:1.55; max-width:260px; margin:0; }
-.sdl-coffee-msg strong { color:rgba(255,255,255,0.78); font-weight:500; }
+.sdl-coffee-img { width:96px; height:112px; object-fit:contain; justify-self:center; }
+.sdl-coffee-copy { display:flex; flex-direction:column; gap:11px; min-width:0; }
+.sdl-coffee-msg { font-size:13px; color:rgba(255,255,255,0.72); line-height:1.45; max-width:none; margin:0; }
+.sdl-coffee-msg strong { color:rgba(255,255,255,0.96); font-weight:800; font-size:14px; }
 .sdl-coffee-btn {
-  display:inline-flex; align-items:center; gap:6px;
-  background:#FFDD00; color:#0a0a0a; border:none; border-radius:20px; padding:8px 18px;
-  font-size:12px; font-weight:700; text-decoration:none; cursor:pointer;
+  display:inline-flex; align-items:center; justify-content:center; gap:8px;
+  background:#ffdd22; color:#171100; border:none; border-radius:10px; padding:12px 18px;
+  font-size:16px; font-weight:800; text-decoration:none; cursor:pointer; width:100%;
   transition:opacity 0.15s,transform 0.1s; letter-spacing:0.01em; -webkit-font-smoothing:antialiased;
 }
+.sdl-coffee-btn img { width:22px; height:22px; object-fit:contain; }
 .sdl-coffee-btn:hover { opacity:0.88; }
 .sdl-coffee-btn:active { transform:scale(0.97); }
 
 /* Settings drawer */
 #sdl-expert-foot {
-  display:flex; align-items:center; gap:8px; margin-top:12px; padding-top:10px;
-  border-top:0.5px solid rgba(255,255,255,0.05); cursor:pointer; color:rgba(255,255,255,0.16);
-  font-size:10px; letter-spacing:0.05em; text-transform:uppercase; user-select:none; transition:color 0.15s;
+  display:flex; align-items:center; gap:8px; margin-top:16px; padding:12px 14px;
+  border:0.5px solid rgba(255,255,255,0.09); border-radius:10px; cursor:pointer; color:rgba(255,255,255,0.45);
+  font-size:12px; font-weight:800; letter-spacing:0.04em; text-transform:uppercase; user-select:none; transition:color 0.15s,background 0.15s;
 }
-#sdl-expert-foot:hover { color:rgba(255,255,255,0.4); }
-#sdl-expert-foot .exp-line { flex:1; height:0.5px; background:rgba(255,255,255,0.05); }
+#sdl-expert-foot:hover { color:rgba(255,255,255,0.7); background:rgba(255,255,255,0.025); }
+#sdl-expert-foot .exp-line { display:none; }
 #sdl-expert-foot .exp-arrow { font-size:8px; transition:transform 0.2s; display:inline-block; }
 #sdl-expert-foot.open .exp-arrow { transform:rotate(180deg); }
 .sdl-sec-title {
@@ -3898,13 +4009,11 @@
           <span class="sdl-src-name">Cameo drafts</span>
           <span class="sdl-src-sub">Featuring you</span>
         </label>
-        <label class="sdl-src-row" id="sdl-src-row-v2_my_characters" title="Preview — your characters' posts + cameo appearances. Drafts endpoint is probed speculatively; please report issues.">
-          <input type="checkbox" id="sdl-src-cb-v2_my_characters">
+        <label class="sdl-src-row" id="sdl-src-row-v2_my_characters" title="Your characters' posts + cameo appearances.">
+          <input type="checkbox" id="sdl-src-cb-v2_my_characters" checked>
           <span class="sdl-src-icon">🎭</span>
           <span class="sdl-src-name">Characters</span>
-          <span class="sdl-src-sub">
-            <a href="https://github.com/charyou/SoraVault/issues/new?labels=characters&amp;title=My+Characters+scan+feedback" target="_blank" rel="noopener" class="sdl-src-report">report issues</a>
-          </span>
+          <span class="sdl-src-sub">Your characters</span>
         </label>
       </div>
 
@@ -4023,6 +4132,7 @@
     <!-- Export toggles -->
     <div class="sdl-export-toggles">
       <div class="sdl-export-row">
+        <span class="sdl-export-icon media">▧</span>
         <span class="sdl-export-lbl">Save media<span>images &amp; videos to disk</span></span>
         <label class="sdl-toggle">
           <input type="checkbox" id="sdl-cfg-SAVE_MEDIA" checked>
@@ -4031,6 +4141,7 @@
         </label>
       </div>
       <div class="sdl-export-row">
+        <span class="sdl-export-icon txt">▤</span>
         <span class="sdl-export-lbl">Save .txt sidecar<span>prompt + metadata per file</span></span>
         <label class="sdl-toggle">
           <input type="checkbox" id="sdl-cfg-DOWNLOAD_TXT" ${CFG.DOWNLOAD_TXT ? 'checked' : ''}>
@@ -4039,6 +4150,7 @@
         </label>
       </div>
       <div class="sdl-export-row">
+        <span class="sdl-export-icon json">{ }</span>
         <span class="sdl-export-lbl">Save .json manifest<span>full metadata export</span></span>
         <label class="sdl-toggle">
           <input type="checkbox" id="sdl-cfg-SAVE_JSON" checked>
@@ -4047,6 +4159,7 @@
         </label>
       </div>
       <div class="sdl-export-row">
+        <span class="sdl-export-icon skip">✓</span>
         <span class="sdl-export-lbl">Skip already-downloaded<span>Files matched by {genId} + min size (video ≥3 MB, image ≥1 MB). Uncheck to force re-download.</span></span>
         <label class="sdl-toggle">
           <input type="checkbox" id="sdl-cfg-SKIP_EXISTING" checked>
@@ -4055,6 +4168,7 @@
         </label>
       </div>
       <div class="sdl-export-row">
+        <span class="sdl-export-icon watermark">◇</span>
         <span class="sdl-export-lbl">Watermark Removal<span>Via soravdl.com (3rd party). No support for drafts.</span></span>
         <span class="sdl-export-badge" id="sdl-watermark-estimate">+0 min</span>
         <label class="sdl-toggle">
@@ -4065,14 +4179,11 @@
       </div>
     </div>
 
-    <!-- Filter disclosure — above download actions -->
-    <div class="sdl-disc" id="sdl-filter-disc">
-      <span class="sdl-disc-line"></span>
-      <span>&#x1F50D; Filters</span>
-      <span class="sdl-disc-badge" id="sdl-filter-badge">none active</span>
-      <span class="sdl-disc-arrow">&#x25bc;</span>
-      <span class="sdl-disc-line"></span>
-    </div>
+    <div class="sdl-filter-card">
+      <div class="sdl-filter-head">
+        <div class="sdl-filter-title">▽ Filters <span class="sdl-disc-badge" id="sdl-filter-badge">none active</span></div>
+        <button type="button" class="sdl-filter-edit" id="sdl-filter-disc">Edit filters <span class="sdl-disc-arrow">&#x203a;</span></button>
+      </div>
 
     <div class="sdl-drawer" id="sdl-filter-drawer">
 
@@ -4159,7 +4270,8 @@
       <a id="sdl-filter-reset">Reset all filters</a>
     </div>
 
-    <div id="sdl-counter-pill">&#x2014;</div>
+      <div id="sdl-counter-pill">&#x2014;</div>
+    </div>
     <button class="sdl-btn sdl-btn-primary"   id="sdl-dl"     disabled>Download All</button>
     <button class="sdl-btn sdl-btn-secondary" id="sdl-rescan">&#x21ba;&#x2002;Rescan</button>
   </div>
@@ -4167,47 +4279,55 @@
   <!-- ─── STATE: downloading ───────────────────────────────── -->
   <div id="sdl-s-downloading" style="display:none">
     <div class="sdl-coffee">
-      <div class="sdl-coffee-icon">☕</div>
-      <p class="sdl-coffee-msg">
-        <strong>SoraVault is free</strong> — built in spare time so your creative work
-        survives Sora's shutdown.<br>
-        If it saved something precious, a coffee means the world.
-      </p>
-      <a class="sdl-coffee-btn"
-         href="https://buymeacoffee.com/soravault"
-         target="_blank" rel="noopener noreferrer">
-        Buy me a coffee ☕
-      </a>
+      <img class="sdl-coffee-img" src="${ENV.COFFEE_BIG_URL}" alt="">
+      <div class="sdl-coffee-copy">
+        <p class="sdl-coffee-msg">
+          <strong>SoraVault is free — built in spare time so your creative work survives Sora's shutdown.</strong><br>
+          If it saved something precious, a coffee means the world.
+        </p>
+        <a class="sdl-coffee-btn"
+           href="https://buymeacoffee.com/soravault"
+           target="_blank" rel="noopener noreferrer">
+          <img src="${ENV.COFFEE_SMALL_URL}" alt=""> Buy me a coffee
+        </a>
+      </div>
     </div>
-    <div class="sdl-big-count">
-      <span class="n">
-        <span id="sdl-dl-count">0</span><span class="sub"> / <span id="sdl-dl-total">0</span></span>
-      </span>
-      <span class="lbl">downloaded</span>
-    </div>
-    <div class="sdl-prog"><div class="sdl-prog-bar" id="sdl-dl-bar" style="width:0%"></div></div>
-    <div id="sdl-activity-line"><span id="sdl-activity-left">&nbsp;</span><span id="sdl-activity-right"></span></div>
-    <div class="sdl-stats">
-      <div class="sdl-stat"><span class="sdl-stat-n" id="sdl-dl-done">0</span><span>done</span></div>
-      <div class="sdl-stat-sep"></div>
-      <div class="sdl-stat" id="sdl-fail-wrap"><span class="sdl-stat-n" id="sdl-dl-failed">0</span><span>failed</span></div>
-      <div class="sdl-stat-sep"></div>
-      <div class="sdl-stat"><span id="sdl-dl-eta"></span></div>
+    <div class="sdl-progress-card">
+      <div class="sdl-big-count">
+        <span class="n">
+          <span id="sdl-dl-count">0</span><span class="sub"> / <span id="sdl-dl-total">0</span></span>
+        </span>
+        <span class="lbl">downloaded</span>
+      </div>
+      <div class="sdl-prog"><div class="sdl-prog-bar" id="sdl-dl-bar" style="width:0%"></div></div>
+      <div id="sdl-activity-line"><span id="sdl-activity-left">&nbsp;</span><span id="sdl-activity-right"></span></div>
+      <div class="sdl-stats">
+        <div class="sdl-stat"><span><span class="sdl-stat-icon">✓</span>Done</span><span class="sdl-stat-n" id="sdl-dl-done">0</span></div>
+        <div class="sdl-stat" id="sdl-fail-wrap"><span><span class="sdl-stat-icon err">×</span>Failed</span><span class="sdl-stat-n" id="sdl-dl-failed">0</span></div>
+        <div class="sdl-stat"><span><span class="sdl-stat-icon muted">◷</span>ETA</span><span class="sdl-stat-n" id="sdl-dl-eta">~0s</span></div>
+        <div class="sdl-stat"><span><span class="sdl-stat-icon muted">☷</span>Active workers</span><span class="sdl-stat-n" id="sdl-dl-active-workers">0</span></div>
+      </div>
     </div>
     <div class="sdl-speed">
-      <span class="sdl-speed-lbl">Download speed</span>
+      <div class="sdl-speed-head">
+        <span class="sdl-speed-lbl">◴ Speed</span>
+        <span class="sdl-speed-workers">Workers ›</span>
+      </div>
       <div class="sdl-speed-segs">
         <div class="sdl-speed-seg spd-std active" data-spd="0">
-          <span class="s-icon">&#x25cf;</span><span class="s-lbl">Standard</span><span class="s-risk">Safe</span>
+          <span class="s-icon">&#x25cf;</span><span class="s-lbl">Safe</span><span class="s-risk">2 workers</span>
         </div>
         <div class="sdl-speed-seg spd-fast" data-spd="1">
-          <span class="s-icon">&#x25ce;</span><span class="s-lbl">Faster</span><span class="s-risk">Low risk</span>
+          <span class="s-icon">&#x25ce;</span><span class="s-lbl">Balanced</span><span class="s-risk">4 workers</span>
         </div>
-        <div class="sdl-speed-seg spd-rip" data-spd="2">
-          <span class="s-icon">&#x25c9;</span><span class="s-lbl">Very fast</span><span class="s-risk">Beware: temp block possible</span>
+        <div class="sdl-speed-seg spd-fast" data-spd="2">
+          <span class="s-icon">&#x25ce;</span><span class="s-lbl">Fast</span><span class="s-risk">6 workers</span>
+        </div>
+        <div class="sdl-speed-seg spd-rip" data-spd="3">
+          <span class="s-icon">&#x25c9;</span><span class="s-lbl">Very Fast</span><span class="s-risk">8 workers</span>
         </div>
       </div>
-      <div class="sdl-speed-hint">2 workers · 60 ms delay · safe</div>
+      <div class="sdl-speed-hint">Higher speed reduces total time but increases block risk.</div>
     </div>
     <div class="sdl-dl-actions">
       <button class="sdl-btn sdl-btn-secondary sdl-btn-pause" id="sdl-pause">⏸ Pause</button>
@@ -4229,16 +4349,18 @@
       <span id="sdl-done-filter-list"></span>
     </div>
     <div class="sdl-coffee">
-      <div class="sdl-coffee-icon">☕</div>
-      <p class="sdl-coffee-msg">
-        <strong>I built this so nobody has to lose their work.</strong><br>
-        It's free, it stays free. A coffee means the world.
-      </p>
-      <a class="sdl-coffee-btn"
-         href="https://buymeacoffee.com/soravault"
-         target="_blank" rel="noopener noreferrer">
-        Buy me a coffee ☕
-      </a>
+      <img class="sdl-coffee-img" src="${ENV.COFFEE_BIG_URL}" alt="">
+      <div class="sdl-coffee-copy">
+        <p class="sdl-coffee-msg">
+          <strong>I built this so nobody has to lose their work.</strong><br>
+          It's free, it stays free. A coffee means the world.
+        </p>
+        <a class="sdl-coffee-btn"
+           href="https://buymeacoffee.com/soravault"
+           target="_blank" rel="noopener noreferrer">
+          <img src="${ENV.COFFEE_SMALL_URL}" alt=""> Buy me a coffee
+        </a>
+      </div>
     </div>
     <div class="sdl-done-secondary">
       <a class="sdl-done-github-link"
@@ -4273,7 +4395,7 @@
   <!-- ─── EXPERT SECTION ───────────────────────────────────── -->
   <div id="sdl-expert-foot">
     <span class="exp-line"></span>
-    <span>&#x26a1; Expert settings</span>
+    <span>&#x26a1; Log & advanced</span>
     <span class="exp-arrow">&#x25bc;</span>
     <span class="exp-line"></span>
   </div>
@@ -4299,11 +4421,24 @@
 </div>`;
         document.body.appendChild(p);
 
-        // Logo fallback
-        document.getElementById('sdl-logo').addEventListener('error', function () {
-            this.style.display = 'none';
+        function installImageFallback(selector, fallbackUrl, onFinalError) {
+            document.querySelectorAll(selector).forEach(img => {
+                img.addEventListener('error', function () {
+                    if (fallbackUrl && this.src !== fallbackUrl) {
+                        this.src = fallbackUrl;
+                        return;
+                    }
+                    onFinalError?.(this);
+                });
+            });
+        }
+
+        installImageFallback('#sdl-logo', ENV.LOGO_FALLBACK_URL, img => {
+            img.style.display = 'none';
             document.getElementById('sdl-logo-fb').style.display = 'flex';
         });
+        installImageFallback('.sdl-coffee-img', ENV.COFFEE_BIG_FALLBACK_URL);
+        installImageFallback('.sdl-coffee-btn img', ENV.COFFEE_SMALL_FALLBACK_URL);
 
         // ── Drag to move ─────────────────────────────────────────────────
         let dragState = null;
