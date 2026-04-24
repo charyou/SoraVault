@@ -97,12 +97,13 @@
     // =====================================================================
     // BROWSE & FETCH (v2.6.0) — passive capture while browsing Sora
     // =====================================================================
-    const BROWSE_FETCH_ROOT_NAME           = 'mirror_browse';
+    const BROWSE_FETCH_ROOT_NAMES          = { mirror: 'mirror_browse', discover: 'discover_download' };
+    const BROWSE_FETCH_MANIFEST_FILES      = { mirror: 'mirror_manifest.json', discover: 'discover_manifest.json' };
     const BROWSE_FETCH_WORKERS             = 4;
     const BROWSE_FETCH_QUEUE_MAX           = 500;
     const BROWSE_FETCH_IDLE_SLEEP_MS       = 1500;
     const BROWSE_FETCH_MANIFEST_DEBOUNCE_MS = 8000;
-    const BROWSE_FETCH_MANIFEST_FILE       = 'mirror_manifest.json';
+    const DISCOVER_IDLE_SLEEP_MS           = 30000;
 
     // =====================================================================
     // SCAN SOURCES  — single source of truth for all source-aware logic
@@ -178,7 +179,7 @@
     let totalToDownload    = 0;
     let speedIdx           = 0;
     let uiState            = 'init';
-    let activeStartMode    = 'regular'; // regular | creator | mirror
+    let activeStartMode    = 'regular'; // regular | creator | mirror | discover
     let mirrorStatsTimer   = null;
     let scanStoryTimer     = null;
     let scanStoryIdx       = 0;
@@ -217,6 +218,7 @@
 
     // Browse & Fetch state
     let browseFetchEnabled        = false;
+    let browseFetchMode           = 'mirror'; // mirror | discover
     let browseFetchBaseDir        = null;  // user-picked base dir
     let browseFetchRootDir        = null;  // cached mirror_browse subfolder handle
     const browseFetchDirCache     = new Map(); // "sora2_profile/charju/drafts" → DirHandle
@@ -225,12 +227,25 @@
     let   browseFetchWorkersActive = 0;
     let   browseFetchStopRequested = false;
     const browseFetchStats        = { captured: 0, skipped: 0, failed: 0, dropped: 0 };
-    const browseFetchFilters      = { minLikes: 0, include: [], exclude: [], saveTxt: true };
+    const browseFetchFilters      = {
+        minLikes: 0, maxLikes: null, include: [], exclude: [], saveTxt: true,
+        version: 'v2', feed: 'explore', dateFrom: '', dateTo: '',
+        ratios: new Set(), includeChars: true, maxCreators: 0, keepPolling: true,
+    };
     const browseFetchManifest     = new Map();  // key → entry
     let   browseFetchManifestDirty = false;
     let   browseFetchManifestTimer = null;
     let   browseFetchManifestLoaded = false;
     const browseFetchDiscoveredEndpoints = new Set();
+
+    // Discover & Download state
+    let discoverRunning          = false;
+    let discoverLoopPromise      = null;
+    let discoverRunToken         = 0;
+    let discoverDrainPromise     = null;
+    const discoverSeenCreators   = new Map(); // userId/username -> { username, userId }
+    const discoverCreatorQueue   = [];
+    const discoverStats          = { pages: 0, creatorsFound: 0, creatorsDone: 0, creatorErrors: 0 };
 
     // Creator Fetch state
     let creatorFetchEnabled      = false;
@@ -612,12 +627,35 @@
         return item.genId || item.postId || null;
     }
 
+    function getBrowseFetchRootName() {
+        return BROWSE_FETCH_ROOT_NAMES[browseFetchMode] || BROWSE_FETCH_ROOT_NAMES.mirror;
+    }
+
+    function getBrowseFetchManifestFile() {
+        return BROWSE_FETCH_MANIFEST_FILES[browseFetchMode] || BROWSE_FETCH_MANIFEST_FILES.mirror;
+    }
+
+    function getBrowseFetchWorkerLimit() {
+        if (browseFetchMode !== 'discover') return BROWSE_FETCH_WORKERS;
+        const preset = SPEED_PRESETS[speedIdx] ?? SPEED_PRESETS[1];
+        return Math.max(1, preset.workers || BROWSE_FETCH_WORKERS);
+    }
+
     function matchesBrowseFetchFilter(item) {
         const f = browseFetchFilters;
+        if (f.version === 'v1' && item.mode !== 'v1') return false;
+        if (f.version === 'v2' && item.mode !== 'v2') return false;
         if (f.minLikes > 0) {
             const lc = Number.isFinite(item.likeCount) ? item.likeCount : 0;
             if (lc < f.minLikes) return false;
         }
+        if (f.maxLikes != null && f.maxLikes >= 0) {
+            const lc = Number.isFinite(item.likeCount) ? item.likeCount : null;
+            if (lc == null || lc > f.maxLikes) return false;
+        }
+        if (f.dateFrom && (!item.date || item.date < f.dateFrom)) return false;
+        if (f.dateTo && (!item.date || item.date > f.dateTo)) return false;
+        if (f.ratios && f.ratios.size > 0 && (!item.ratio || !f.ratios.has(item.ratio))) return false;
         const prompt = (item.prompt || '').toLowerCase();
         if (f.exclude.length && f.exclude.some(t => prompt.includes(t))) return false;
         if (f.include.length && !f.include.some(t => prompt.includes(t))) return false;
@@ -705,6 +743,11 @@
                 // Don't pollute `collected` (the active-scan list) with opportunistic finds — just enqueue.
                 if (entry) maybeEnqueueBrowseFetch(entry, pathname);
             });
+            if (discoverRunning) {
+                discoverExtractCreators(data);
+                scheduleDiscoverDrain();
+                updateMirrorRunningStats();
+            }
         } catch (e) { /* silent — opportunistic is best-effort */ }
     }
 
@@ -772,7 +815,7 @@
         if (browseFetchManifestLoaded || !browseFetchRootDir) return;
         browseFetchManifestLoaded = true;
         try {
-            const fh = await browseFetchRootDir.getFileHandle(BROWSE_FETCH_MANIFEST_FILE, { create: false });
+            const fh = await browseFetchRootDir.getFileHandle(getBrowseFetchManifestFile(), { create: false });
             const f  = await fh.getFile();
             const text = await f.text();
             const data = JSON.parse(text);
@@ -804,7 +847,7 @@
             entries: [...browseFetchManifest.values()],
         };
         try {
-            const fh = await browseFetchRootDir.getFileHandle(BROWSE_FETCH_MANIFEST_FILE, { create: true });
+            const fh = await browseFetchRootDir.getFileHandle(getBrowseFetchManifestFile(), { create: true });
             const w  = await fh.createWritable();
             await w.write(JSON.stringify(payload, null, 2));
             await w.close();
@@ -814,7 +857,7 @@
     // Worker loop — pops from queue, downloads, writes manifest entry.
     function startBrowseFetchWorkers() {
         if (!browseFetchEnabled || browseFetchStopRequested) return;
-        while (browseFetchWorkersActive < BROWSE_FETCH_WORKERS && browseFetchQueue.length > 0) {
+        while (browseFetchWorkersActive < getBrowseFetchWorkerLimit() && browseFetchQueue.length > 0) {
             browseFetchWorkersActive++;
             browseFetchWorkerLoop().finally(() => { browseFetchWorkersActive--; });
         }
@@ -880,18 +923,23 @@
         browseFetchScheduleManifestWrite();
     }
 
-    async function enableBrowseFetch() {
-        if (browseFetchEnabled) return true;
+    async function enableBrowseFetch(mode = 'mirror') {
+        if (browseFetchEnabled) return browseFetchMode === mode;
+        browseFetchMode = mode;
+        browseFetchManifest.clear();
+        browseFetchSeen.clear();
+        browseFetchDirCache.clear();
+        browseFetchManifestLoaded = false;
         if (!browseFetchBaseDir) {
             try { browseFetchBaseDir = await window.showDirectoryPicker(); }
             catch { return false; }
         }
-        try { browseFetchRootDir = await browseFetchBaseDir.getDirectoryHandle(BROWSE_FETCH_ROOT_NAME, { create: true }); }
-        catch (e) { log(`⚠ Browse&Fetch: cannot open ${BROWSE_FETCH_ROOT_NAME}/ — ${e.message}`); return false; }
+        try { browseFetchRootDir = await browseFetchBaseDir.getDirectoryHandle(getBrowseFetchRootName(), { create: true }); }
+        catch (e) { log(`⚠ Browse&Fetch: cannot open ${getBrowseFetchRootName()}/ — ${e.message}`); return false; }
         await browseFetchLoadManifest();
         browseFetchEnabled = true;
         browseFetchStopRequested = false;
-        log(`📡 Browse&Fetch: ON → ${BROWSE_FETCH_ROOT_NAME}/`);
+        log(`📡 Browse&Fetch: ON → ${getBrowseFetchRootName()}/`);
         updateBrowseFetchBadge();
         return true;
     }
@@ -1236,7 +1284,7 @@
     }
 
     async function fetchAllV2(baseEndpoint, sourceId, contextTag = null, opts = {}) {
-        const { quiet = false, silent = false } = opts;
+        const { quiet = false, silent = false, capturedPath = null } = opts;
         if (!silent) log(`── ${sourceId}${contextTag ? ` · ${contextTag}` : ''} ──`);
         const base = `${location.origin}${baseEndpoint}`;
         let cursor = null, hasMore = true, page = 0;
@@ -1249,7 +1297,7 @@
             let data;
             try { data = await r.json(); }
             catch(e) { if (!silent) log(`${sourceId}: JSON parse error`); if (!silent) setSrcStatus(sourceId, 'error'); return; }
-            const result = ingestV2Page(data, url, sourceId, null, contextTag);
+            const result = ingestV2Page(data, url, sourceId, capturedPath, contextTag);
             hasMore = result.nextCursor != null;
             cursor  = result.nextCursor;
             if (!quiet) log(`${sourceId} p${page}: ${collected.size} items${hasMore ? '…' : ' ✓'}`);
@@ -1471,6 +1519,292 @@
         }
         renderCreatorScanProgress();
         log(`Creators ✓  · total ${collected.size}`);
+    }
+
+    // =====================================================================
+    // DISCOVER & DOWNLOAD
+    // =====================================================================
+    function resetDiscoverState() {
+        discoverSeenCreators.clear();
+        discoverCreatorQueue.length = 0;
+        discoverStats.pages = 0;
+        discoverStats.creatorsFound = 0;
+        discoverStats.creatorsDone = 0;
+        discoverStats.creatorErrors = 0;
+    }
+
+    function discoverCreatorKey(profile) {
+        return profile?.userId || profile?.username || null;
+    }
+
+    function normaliseDiscoverProfile(profile) {
+        if (!profile || typeof profile !== 'object') return null;
+        const username = profile.username ?? profile.handle ?? profile.name ?? null;
+        const userId = profile.user_id ?? profile.userId ?? profile.id ?? profile.profile_id ?? null;
+        if (!username && !userId) return null;
+        return {
+            username: username ? String(username).replace(/^@/, '').toLowerCase() : null,
+            userId: userId ? String(userId) : null,
+        };
+    }
+
+    function discoverRememberCreator(profile) {
+        if (browseFetchFilters.version !== 'v2') return false;
+        const c = normaliseDiscoverProfile(profile);
+        const key = discoverCreatorKey(c);
+        if (!key || discoverSeenCreators.has(key)) return false;
+        for (const seen of discoverSeenCreators.values()) {
+            if (c.userId && seen.userId === c.userId) return false;
+            if (c.username && seen.username === c.username) return false;
+        }
+        if (browseFetchFilters.maxCreators > 0 && discoverSeenCreators.size >= browseFetchFilters.maxCreators) return false;
+        discoverSeenCreators.set(key, c);
+        discoverCreatorQueue.push(c);
+        discoverStats.creatorsFound++;
+        return true;
+    }
+
+    function discoverExtractCreators(value, depth = 0) {
+        if (!value || typeof value !== 'object' || depth > 4) return;
+        if (Array.isArray(value)) {
+            value.forEach(v => discoverExtractCreators(v, depth + 1));
+            return;
+        }
+        [
+            value.profile, value.author, value.user, value.creator,
+            value.post?.author, value.post?.profile, value.generation?.user,
+        ].forEach(discoverRememberCreator);
+        for (const key of ['items', 'data', 'posts', 'results', 'generations']) {
+            if (Array.isArray(value[key])) discoverExtractCreators(value[key], depth + 1);
+        }
+    }
+
+    function discoverIngestFeedPayload(data, urlPath) {
+        const candidates = [];
+        if (Array.isArray(data?.items)) candidates.push(...data.items);
+        if (Array.isArray(data?.data)) candidates.push(...data.data);
+        if (Array.isArray(data?.posts)) candidates.push(...data.posts);
+        if (Array.isArray(data?.results)) candidates.push(...data.results);
+        if (Array.isArray(data?.generations)) candidates.push(...data.generations);
+        candidates.forEach(raw => {
+            const entry = normaliseOpportunisticItem(raw);
+            if (entry) maybeEnqueueBrowseFetch(entry, urlPath);
+        });
+        discoverExtractCreators(data);
+    }
+
+    function discoverReadCursor(data, endpoint) {
+        if (endpoint?.cursorParam === 'after') {
+            return data?.after
+                ?? data?.next_after
+                ?? data?.nextAfter
+                ?? data?.last_id
+                ?? data?.lastId
+                ?? data?.pagination?.after
+                ?? null;
+        }
+        return data?.cursor
+            ?? data?.next_cursor
+            ?? data?.nextCursor
+            ?? data?.page_info?.end_cursor
+            ?? data?.pagination?.cursor
+            ?? null;
+    }
+
+    function discoverDescribePayload(data) {
+        if (!data || typeof data !== 'object') return 'non-object response';
+        const keys = Object.keys(data).slice(0, 8).join(',') || 'no keys';
+        const counts = ['items', 'data', 'posts', 'results', 'generations']
+            .filter(k => Array.isArray(data[k]))
+            .map(k => `${k}:${data[k].length}`);
+        return `keys=${keys}${counts.length ? ` arrays=${counts.join(',')}` : ''}`;
+    }
+
+    function discoverFeedEndpoints() {
+        const feed = browseFetchFilters.feed === 'top' ? 'top' : 'explore';
+        const top = feed === 'top';
+        const v = browseFetchFilters.version;
+        if (v === 'v1') {
+            return [{
+                path: '/backend/feed/home?limit=24',
+                cursorParam: 'after',
+                label: 'Sora 1 Explore',
+                capturedPath: '/explore',
+            }];
+        }
+        if (top) {
+            return [
+                {
+                    path: '/backend/project_y/feed?limit=8&cut=top',
+                    cursorParam: 'cursor',
+                    label: 'Sora 2 Top cut=top',
+                    capturedPath: '/explore?feed=top',
+                },
+                {
+                    path: '/backend/project_y/feed?limit=8&cut=nf2&feed=top',
+                    cursorParam: 'cursor',
+                    label: 'Sora 2 Top feed=top',
+                    capturedPath: '/explore?feed=top',
+                },
+            ];
+        }
+        return [{
+            path: '/backend/project_y/feed?limit=8&cut=nf2',
+            cursorParam: 'cursor',
+            label: 'Sora 2 Explore',
+            capturedPath: '/explore',
+        }];
+    }
+
+    async function discoverFetchFeedOnce(token) {
+        let anyUseful = false;
+        for (const endpoint of discoverFeedEndpoints()) {
+            if (stopRequested || !discoverRunning || token !== discoverRunToken) break;
+            const base = `${location.origin}${endpoint.path}`;
+            let cursor = null;
+            for (let page = 0; page < 20 && !stopRequested && discoverRunning && token === discoverRunToken; page++) {
+                const sep = base.includes('?') ? '&' : '?';
+                const cursorParam = endpoint.cursorParam || 'cursor';
+                const url = cursor ? `${base}${sep}${cursorParam}=${encodeURIComponent(cursor)}` : base;
+                let r;
+                try {
+                    r = await _fetch(url, { credentials: 'include', headers: buildHeaders() });
+                } catch(e) {
+                    log(`Discover probe ${endpoint.label}: network error ${e.message}`);
+                    break;
+                }
+                if (!r.ok) {
+                    log(`Discover probe ${endpoint.label}: HTTP ${r.status}`);
+                    break;
+                }
+                let data;
+                try { data = await r.json(); }
+                catch(e) { log(`Discover: JSON parse failed for ${endpoint.label}`); break; }
+                log(`Discover probe ${endpoint.label}: OK ${discoverDescribePayload(data)}`);
+                discoverStats.pages++;
+                const beforeCreators = discoverStats.creatorsFound;
+                const beforeCaptured = browseFetchStats.captured;
+                discoverIngestFeedPayload(data, endpoint.capturedPath || topPathForDiscover());
+                if (discoverStats.creatorsFound > beforeCreators || browseFetchStats.captured > beforeCaptured) anyUseful = true;
+                cursor = discoverReadCursor(data, endpoint);
+                updateMirrorRunningStats();
+                if ((data?.has_more === true || data?.hasMore === true) && !cursor) {
+                    log(`Discover probe ${endpoint.label}: has_more=true but no ${cursorParam} cursor found`);
+                }
+                if (!cursor) break;
+                await sleep(80);
+            }
+            if (anyUseful) break;
+        }
+        return anyUseful;
+    }
+
+    function topPathForDiscover() {
+        return browseFetchFilters.feed === 'top' ? '/explore?feed=top' : '/explore';
+    }
+
+    async function resolveDiscoverCreator(profile) {
+        if (profile.userId && profile.username) return profile;
+        if (!profile.username) return profile.userId ? profile : null;
+        try {
+            const r = await _fetch(
+                `${location.origin}/backend/project_y/profile/username/${encodeURIComponent(profile.username)}`,
+                { credentials: 'include', headers: buildHeaders() }
+            );
+            if (!r.ok) return profile.userId ? profile : null;
+            const d = await r.json();
+            return {
+                username: profile.username,
+                userId: d?.user_id ?? profile.userId ?? null,
+            };
+        } catch(e) {
+            return profile.userId ? profile : null;
+        }
+    }
+
+    async function discoverFetchCreator(profile) {
+        const c = await resolveDiscoverCreator(profile);
+        if (!c?.userId) return false;
+        const username = c.username || c.userId;
+        await fetchAllV2(
+            `/backend/project_y/profile_feed/${encodeURIComponent(c.userId)}?limit=8&cut=nf2`,
+            'v2_creator', username, { quiet: true, silent: true, capturedPath: `/profile/${username}` }
+        );
+        if (browseFetchFilters.includeChars) {
+            await fetchCharactersOfUser(c.userId, async (ch) => {
+                const chId = getCharacterId(ch);
+                const chUsername = ch?.username ?? 'unknown';
+                if (!chId || !chId.startsWith('ch_')) return;
+                await fetchAllV2(
+                    `/backend/project_y/profile_feed/${encodeURIComponent(chId)}?limit=8&cut=nf2`,
+                    'v2_creator', username, { quiet: true, silent: true, capturedPath: `/profile/${username}/characters/${chUsername}` }
+                );
+                await fetchAllV2(
+                    `/backend/project_y/profile_feed/${encodeURIComponent(chId)}?limit=8&cut=appearances`,
+                    'v2_creator', username, { quiet: true, silent: true, capturedPath: `/profile/${username}/characters/${chUsername}/appearances` }
+                );
+                log(`Discover: ${username} -> character ${chUsername}`);
+            });
+        }
+        return true;
+    }
+
+    async function discoverDrainCreatorQueue(token) {
+        const limit = Math.max(1, Math.min(4, (SPEED_PRESETS[speedIdx] ?? SPEED_PRESETS[1]).workers || 4));
+        const workers = Array.from({ length: limit }, async () => {
+            while (discoverRunning && !stopRequested && token === discoverRunToken) {
+                const creator = discoverCreatorQueue.shift();
+                if (!creator) return;
+                try {
+                    const ok = await discoverFetchCreator(creator);
+                    if (ok) discoverStats.creatorsDone++;
+                    else discoverStats.creatorErrors++;
+                } catch(e) {
+                    discoverStats.creatorErrors++;
+                    log(`Discover: creator failed - ${e.message}`);
+                }
+                updateMirrorRunningStats();
+                await sleep(120);
+            }
+        });
+        await Promise.all(workers);
+    }
+
+    function scheduleDiscoverDrain() {
+        if (!discoverRunning || discoverDrainPromise) return;
+        const token = discoverRunToken;
+        discoverDrainPromise = discoverDrainCreatorQueue(token)
+            .finally(() => { discoverDrainPromise = null; });
+    }
+
+    async function discoverLoop(token) {
+        if (!CFG.BEARER_TOKEN) {
+            try {
+                const sessionRes = await _fetch('/api/auth/session');
+                if (sessionRes.ok) {
+                    const sessionData = await sessionRes.json();
+                    if (sessionData?.accessToken) CFG.BEARER_TOKEN = sessionData.accessToken;
+                }
+            } catch (e) {}
+        }
+        for (let w = 0; !oaiDeviceId && w < 40 && !stopRequested; w++) await sleep(250);
+        if (browseFetchFilters.feed === 'top' && browseFetchFilters.version !== 'v2') {
+            browseFetchFilters.version = 'v2';
+            log('Discover: Top feed is Sora 2 only; using Sora 2.');
+        }
+        log(`Discover: ${browseFetchFilters.feed === 'top' ? 'Top' : 'Explore'} feed started.`);
+        while (discoverRunning && !stopRequested && token === discoverRunToken) {
+            const ok = await discoverFetchFeedOnce(token);
+            await discoverDrainCreatorQueue(token);
+            if (!browseFetchFilters.keepPolling) break;
+            if (!ok) log('Discover: no media from direct probes yet. Open Explore once while Discover is running to let SoraVault learn the live feed response.');
+            await sleep(DISCOVER_IDLE_SLEEP_MS);
+        }
+        if (token !== discoverRunToken) return;
+        discoverRunning = false;
+        updateScanButton();
+        updateMirrorRunningStats();
+        log(`Discover: idle - ${discoverStats.creatorsDone} creators discovered, ${browseFetchManifest.size} files in manifest.`);
     }
 
     // =====================================================================
@@ -2138,6 +2472,12 @@
             btn.classList.toggle('sdl-btn-stop', browseFetchEnabled);
             return;
         }
+        if (activeStartMode === 'discover') {
+            btn.disabled = false;
+            btn.textContent = discoverRunning ? 'Stop Discover & Download' : 'Start Discover & Download';
+            btn.classList.toggle('sdl-btn-stop', discoverRunning);
+            return;
+        }
         const availableCount = SCAN_SOURCES.filter(s => {
             const cb = document.getElementById('sdl-src-cb-' + s.id);
             return !cb || !cb.disabled;
@@ -2282,18 +2622,53 @@
         const failed = document.getElementById('sdl-mirror-failed');
         const folder = document.getElementById('sdl-mirror-folder');
         const filtersEl = document.getElementById('sdl-mirror-filters');
+        const isDiscover = browseFetchMode === 'discover';
+        const liveText = document.getElementById('sdl-mirror-live-text');
+        const countLabel = document.getElementById('sdl-mirror-count-label');
+        const stopBtn = document.getElementById('sdl-stop-mirror');
         if (saved) saved.textContent = browseFetchManifest.size.toLocaleString();
+        if (countLabel) countLabel.textContent = isDiscover ? 'discover items saved' : 'mirror items saved';
+        if (liveText) liveText.textContent = isDiscover
+            ? `Discovering creators (${discoverStats.creatorsDone}/${discoverStats.creatorsFound})`
+            : 'Mirror Mode is watching your Sora browsing';
+        if (stopBtn) stopBtn.textContent = isDiscover ? 'Stop Discover & Download' : 'Stop Mirror Mode';
+        const mirrorMaxWrap = document.getElementById('sdl-mirror-maxlikes-wrap');
+        const mirrorIncWrap = document.getElementById('sdl-mirror-include-wrap');
+        const mirrorExcWrap = document.getElementById('sdl-mirror-exclude-wrap');
+        if (mirrorMaxWrap) mirrorMaxWrap.style.display = isDiscover ? '' : 'none';
+        if (mirrorIncWrap) mirrorIncWrap.style.display = isDiscover ? 'none' : '';
+        if (mirrorExcWrap) mirrorExcWrap.style.display = isDiscover ? 'none' : '';
+        const mirrorMin = document.getElementById('sdl-mirror-minlikes');
+        const mirrorMax = document.getElementById('sdl-mirror-maxlikes');
+        if (mirrorMin && document.activeElement !== mirrorMin) mirrorMin.value = String(browseFetchFilters.minLikes || 0);
+        if (mirrorMax && document.activeElement !== mirrorMax) mirrorMax.value = browseFetchFilters.maxLikes == null ? '' : String(browseFetchFilters.maxLikes);
         if (captured) captured.textContent = browseFetchStats.captured.toLocaleString();
         if (queued) queued.textContent = browseFetchQueue.length.toLocaleString();
         if (failed) failed.textContent = browseFetchStats.failed.toLocaleString();
-        if (folder) folder.textContent = browseFetchBaseDir ? `${browseFetchBaseDir.name}/${BROWSE_FETCH_ROOT_NAME}/` : '(no folder picked)';
+        if (folder) folder.textContent = browseFetchBaseDir ? `${browseFetchBaseDir.name}/${getBrowseFetchRootName()}/` : '(no folder picked)';
         if (filtersEl) {
             const parts = [];
             if (browseFetchFilters.minLikes > 0) parts.push(`min likes ${browseFetchFilters.minLikes}`);
+            if (browseFetchFilters.maxLikes != null) parts.push(`max likes ${browseFetchFilters.maxLikes}`);
             if (browseFetchFilters.include.length) parts.push(`include: ${browseFetchFilters.include.join(', ')}`);
             if (browseFetchFilters.exclude.length) parts.push(`exclude: ${browseFetchFilters.exclude.join(', ')}`);
+            if (browseFetchMode === 'discover') {
+                parts.push(browseFetchFilters.version === 'v1' ? 'Sora 1' : 'Sora 2');
+                parts.push(browseFetchFilters.feed === 'top' ? 'Top feed' : 'Explore feed');
+                if (browseFetchFilters.dateFrom) parts.push(`from ${browseFetchFilters.dateFrom}`);
+                if (browseFetchFilters.dateTo) parts.push(`to ${browseFetchFilters.dateTo}`);
+                if (browseFetchFilters.ratios.size) parts.push(`ratio ${[...browseFetchFilters.ratios].join(', ')}`);
+                parts.push(browseFetchFilters.includeChars ? 'characters on' : 'characters off');
+            }
             parts.push(browseFetchFilters.saveTxt ? 'prompts on' : 'prompts off');
             filtersEl.textContent = parts.join(' · ');
+        }
+        const discoverBadge = document.getElementById('sdl-discover-badge');
+        if (discoverBadge) {
+            discoverBadge.textContent = discoverRunning
+                ? `${discoverStats.creatorsDone}/${discoverStats.creatorsFound} creators`
+                : `${discoverStats.creatorsFound || 0} creators`;
+            discoverBadge.classList.toggle('on', discoverRunning || discoverStats.creatorsFound > 0);
         }
         updateScanButton();
     }
@@ -2315,18 +2690,51 @@
             startMirrorStatsTimer();
             return;
         }
-        const ok = await enableBrowseFetch();
+        const ok = await enableBrowseFetch('mirror');
         if (!ok) {
             updateScanButton();
             return;
         }
         const bfFolder = document.getElementById('sdl-bf-folder');
-        if (bfFolder && browseFetchBaseDir) bfFolder.textContent = `${browseFetchBaseDir.name}/${BROWSE_FETCH_ROOT_NAME}/`;
+        if (bfFolder && browseFetchBaseDir) bfFolder.textContent = `${browseFetchBaseDir.name}/${getBrowseFetchRootName()}/`;
         setState('mirror');
         startMirrorStatsTimer();
     }
 
     async function stopMirrorMode() {
+        await disableBrowseFetch();
+        stopMirrorStatsTimer();
+        setState('init');
+        updateScanButton();
+    }
+
+    async function startDiscoverMode() {
+        if (discoverRunning) {
+            await stopDiscoverMode();
+            return;
+        }
+        if (speedIdx === 0) setSpeedIdx(1);
+        resetDiscoverState();
+        const ok = await enableBrowseFetch('discover');
+        if (!ok) { updateScanButton(); return; }
+        discoverRunning = true;
+        const token = ++discoverRunToken;
+        browseFetchStopRequested = false;
+        stopRequested = false;
+        setState('mirror');
+        startMirrorStatsTimer();
+        discoverLoopPromise = discoverLoop(token);
+        updateScanButton();
+    }
+
+    async function stopDiscoverMode() {
+        discoverRunning = false;
+        discoverRunToken++;
+        stopRequested = true;
+        if (discoverLoopPromise) {
+            try { await Promise.race([discoverLoopPromise, sleep(1500)]); } catch(e) {}
+            discoverLoopPromise = null;
+        }
         await disableBrowseFetch();
         stopMirrorStatsTimer();
         setState('init');
@@ -2341,6 +2749,10 @@
                 return;
             }
             await startMirrorMode();
+            return;
+        }
+        if (activeStartMode === 'discover') {
+            await startDiscoverMode();
             return;
         }
         if (activeStartMode === 'creator' && !isV2Supported) {
@@ -2384,6 +2796,10 @@
 
     function stopAll() {
         const wasDownloading = uiState === 'downloading';
+        if (discoverRunning) {
+            stopDiscoverMode();
+            return;
+        }
         stopRequested = true; isRunning = false;
         // Release any paused workers so they observe stopRequested and exit
         if (isPaused && pauseResolver) { pauseResolver(); pauseResolver = null; }
@@ -2963,7 +3379,9 @@
         setStatus({
             init:        '',
             scanning:    'Scanning your selected Sora sources',
-            mirror:      'Mirror Mode is watching your Sora browsing and saving matches in the background',
+            mirror:      browseFetchMode === 'discover'
+                ? 'Discover & Download is exploring feeds and saving matching creator content'
+                : 'Mirror Mode is watching your Sora browsing and saving matches in the background',
             ready:       '',
             downloading: dlMethod === 'gm'
                 ? 'Saving via Tampermonkey → default Downloads folder'
@@ -3507,6 +3925,8 @@
   border-radius:6px; color:rgba(255,255,255,0.85); box-sizing:border-box;
   font-family:inherit; resize:vertical;
 }
+.sdl-bf-input option { background:#111827; color:rgba(255,255,255,0.88); }
+select.sdl-bf-input { min-height:28px; resize:none; }
 .sdl-bf-input-num { width:70px; }
 .sdl-bf-hint { font-size:9.5px; color:rgba(255,255,255,0.25); margin-top:6px; line-height:1.4; }
 .sdl-bf-hint code { font-family:monospace; color:rgba(147,197,253,0.7); }
@@ -4298,6 +4718,79 @@
     </div>
     <!-- /Mirror section -->
 
+    <!-- ── DISCOVER section (active explore/top creator discovery) ── -->
+    <div class="sdl-mode-card" id="sdl-mode-discover" data-mode="discover">
+      <div class="sdl-mode-head" data-mode="discover">
+        <span class="sdl-mode-radio"></span>
+        <span class="sdl-mode-icon">&#x1f50d;</span>
+        <span class="sdl-mode-copy">
+          <span class="sdl-mode-title">Discover &amp; Download <span class="sdl-beta-tag">beta</span><span class="sdl-active-pill">active</span></span>
+          <span class="sdl-mode-sub">Auto-discover creators and download matching content.</span>
+        </span>
+        <span id="sdl-discover-badge" class="sdl-bf-badge">0 creators</span>
+        <span class="sdl-mode-arrow">⌄</span>
+      </div>
+      <div class="sdl-mode-body" id="sdl-discover-body" style="display:none;">
+        <button class="sdl-btn sdl-btn-secondary" id="sdl-discover-pick" style="margin:6px 0;">Pick folder...</button>
+        <div id="sdl-discover-folder" class="sdl-bf-folder">(no folder picked yet)</div>
+        <div class="sdl-bf-row">
+          <label class="sdl-bf-lbl">Sora version
+            <select id="sdl-discover-version" class="sdl-bf-input">
+              <option value="v1">Sora 1</option>
+              <option value="v2" selected>Sora 2</option>
+            </select>
+          </label>
+          <label class="sdl-bf-lbl">Feed
+            <select id="sdl-discover-feed" class="sdl-bf-input">
+              <option value="explore">Explore</option>
+              <option value="top">Top (Sora 2)</option>
+            </select>
+          </label>
+        </div>
+        <div class="sdl-bf-row">
+          <label class="sdl-bf-lbl">Min likes
+            <input type="number" id="sdl-discover-minlikes" min="0" value="0" class="sdl-bf-input sdl-bf-input-num">
+          </label>
+          <label class="sdl-bf-lbl">Max likes
+            <input type="number" id="sdl-discover-maxlikes" min="0" class="sdl-bf-input sdl-bf-input-num" placeholder="any">
+          </label>
+          <label class="sdl-bf-lbl">Max creators
+            <input type="number" id="sdl-discover-maxcreators" min="0" value="0" class="sdl-bf-input sdl-bf-input-num" title="0 = unlimited">
+          </label>
+        </div>
+        <label class="sdl-bf-lbl">Include keywords (comma-separated, any match)
+          <textarea id="sdl-discover-include" class="sdl-bf-input" rows="1" placeholder="e.g. anime, cyberpunk"></textarea>
+        </label>
+        <label class="sdl-bf-lbl">Exclude keywords (comma-separated, skip on match)
+          <textarea id="sdl-discover-exclude" class="sdl-bf-input" rows="1" placeholder="e.g. nsfw"></textarea>
+        </label>
+        <div class="sdl-bf-row">
+          <label class="sdl-bf-lbl">Date from
+            <input type="date" id="sdl-discover-datefrom" class="sdl-bf-input">
+          </label>
+          <label class="sdl-bf-lbl">Date to
+            <input type="date" id="sdl-discover-dateto" class="sdl-bf-input">
+          </label>
+        </div>
+        <label class="sdl-bf-lbl">Aspect ratios
+          <input id="sdl-discover-ratios" class="sdl-bf-input" placeholder="e.g. 16:9, 9:16">
+        </label>
+        <div class="sdl-bf-row">
+          <label class="sdl-bf-lbl sdl-bf-lbl-inline">Include creator characters
+            <input type="checkbox" id="sdl-discover-chars" checked>
+          </label>
+          <label class="sdl-bf-lbl sdl-bf-lbl-inline">Keep polling
+            <input type="checkbox" id="sdl-discover-poll" checked>
+          </label>
+          <label class="sdl-bf-lbl sdl-bf-lbl-inline">Save prompts
+            <input type="checkbox" id="sdl-discover-savetxt" checked>
+          </label>
+        </div>
+        <div class="sdl-bf-hint">Folder: <code>discover_download/</code> · manifest: <code>discover_manifest.json</code> · default speed: Balanced (4 workers)</div>
+      </div>
+    </div>
+    <!-- /Discover section -->
+
   
 
       <button class="sdl-btn sdl-btn-primary" id="sdl-scan">Start Scan</button>
@@ -4328,9 +4821,9 @@
     <div class="sdl-mirror-hero">
       <div class="sdl-big-count">
         <span class="n" id="sdl-mirror-saved">0</span>
-        <span class="lbl">mirror items saved</span>
+        <span class="lbl" id="sdl-mirror-count-label">mirror items saved</span>
       </div>
-      <div class="sdl-mirror-live"><span class="sdl-mirror-live-dot"></span><span>Mirror Mode is watching your Sora browsing</span></div>
+      <div class="sdl-mirror-live"><span class="sdl-mirror-live-dot"></span><span id="sdl-mirror-live-text">Mirror Mode is watching your Sora browsing</span></div>
       <div class="sdl-mirror-minimize-hint">You can minimise SoraVault now. When the glowing monitor is visible, Mirror Mode is still scanning in the background.</div>
     </div>
     <div class="sdl-mirror-panel">
@@ -4343,11 +4836,14 @@
           <label class="sdl-bf-lbl">Min likes
             <input type="number" id="sdl-mirror-minlikes" min="0" value="0" class="sdl-bf-input sdl-bf-input-num">
           </label>
+          <label class="sdl-bf-lbl" id="sdl-mirror-maxlikes-wrap" style="display:none;">Max likes
+            <input type="number" id="sdl-mirror-maxlikes" min="0" class="sdl-bf-input sdl-bf-input-num" placeholder="any">
+          </label>
         </div>
-        <label class="sdl-bf-lbl">Include keywords (comma-separated)
+        <label class="sdl-bf-lbl" id="sdl-mirror-include-wrap">Include keywords (comma-separated)
           <textarea id="sdl-mirror-include" class="sdl-bf-input" rows="1" placeholder="e.g. anime, cyberpunk"></textarea>
         </label>
-        <label class="sdl-bf-lbl">Exclude keywords (comma-separated)
+        <label class="sdl-bf-lbl" id="sdl-mirror-exclude-wrap">Exclude keywords (comma-separated)
           <textarea id="sdl-mirror-exclude" class="sdl-bf-input" rows="1" placeholder="e.g. nsfw"></textarea>
         </label>
       </div>
@@ -4723,11 +5219,11 @@
 
         // ── Settings / Expert drawers ──────────────────────────────────────
         function setStartMode(mode) {
-            if (mode === 'discover') return;
             if (mode === 'creator' && !isV2Supported) {
                 setStatus('Creator Backup requires Sora 2 access');
                 return;
             }
+            if (mode === 'discover' && speedIdx === 0) setSpeedIdx(1);
             activeStartMode = mode;
             document.querySelectorAll('.sdl-mode-card').forEach(card => {
                 card.classList.toggle('active', card.dataset.mode === mode);
@@ -4737,6 +5233,7 @@
             document.getElementById('sdl-mode-body-regular').style.display = mode === 'regular' ? '' : 'none';
             document.getElementById('sdl-cf-body').style.display = mode === 'creator' ? '' : 'none';
             document.getElementById('sdl-bf-body').style.display = mode === 'mirror' ? '' : 'none';
+            document.getElementById('sdl-discover-body').style.display = mode === 'discover' ? '' : 'none';
             creatorFetchEnabled = mode === 'creator';
             updateCreatorsBadge();
             updateScanButton();
@@ -4768,8 +5265,12 @@
         // ── Primary actions ───────────────────────────────────────────────
         document.getElementById('sdl-scan').addEventListener('click',      startScan);
         document.getElementById('sdl-stop-scan').addEventListener('click', stopAll);
-        document.getElementById('sdl-stop-mirror').addEventListener('click', stopMirrorMode);
+        document.getElementById('sdl-stop-mirror').addEventListener('click', () => {
+            if (browseFetchMode === 'discover' || discoverRunning) stopDiscoverMode();
+            else stopMirrorMode();
+        });
         document.getElementById('sdl-mirror-back').addEventListener('click', () => {
+            if (discoverRunning) return;
             setState('init');
             updateScanButton();
         });
@@ -4798,10 +5299,27 @@
         const bfSaveTxt  = document.getElementById('sdl-bf-savetxt');
         const bfPick     = document.getElementById('sdl-bf-pick');
         const mirrorMinLikes = document.getElementById('sdl-mirror-minlikes');
+        const mirrorMaxLikes = document.getElementById('sdl-mirror-maxlikes');
         const mirrorInclude  = document.getElementById('sdl-mirror-include');
         const mirrorExclude  = document.getElementById('sdl-mirror-exclude');
+        const discoverFolder = document.getElementById('sdl-discover-folder');
+        const discoverPick = document.getElementById('sdl-discover-pick');
+        const discoverVersion = document.getElementById('sdl-discover-version');
+        const discoverFeed = document.getElementById('sdl-discover-feed');
+        const discoverMinLikes = document.getElementById('sdl-discover-minlikes');
+        const discoverMaxLikes = document.getElementById('sdl-discover-maxlikes');
+        const discoverMaxCreators = document.getElementById('sdl-discover-maxcreators');
+        const discoverInclude = document.getElementById('sdl-discover-include');
+        const discoverExclude = document.getElementById('sdl-discover-exclude');
+        const discoverDateFrom = document.getElementById('sdl-discover-datefrom');
+        const discoverDateTo = document.getElementById('sdl-discover-dateto');
+        const discoverRatios = document.getElementById('sdl-discover-ratios');
+        const discoverChars = document.getElementById('sdl-discover-chars');
+        const discoverPoll = document.getElementById('sdl-discover-poll');
+        const discoverSaveTxt = document.getElementById('sdl-discover-savetxt');
 
         const parseTerms = v => (v || '').split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
+        const parseRatios = v => new Set(parseTerms(v).filter(t => /^\d+:\d+$/.test(t)));
         const setIfDifferent = (el, value) => {
             if (el && el.value !== value) el.value = value;
         };
@@ -4825,9 +5343,23 @@
             const includeEl = source === 'mirror' ? mirrorInclude : bfInclude;
             const excludeEl = source === 'mirror' ? mirrorExclude : bfExclude;
             browseFetchFilters.minLikes = Math.max(0, parseInt(minEl.value) || 0);
+            if (source === 'mirror' && browseFetchMode === 'discover') {
+                const maxLikes = parseInt(mirrorMaxLikes.value);
+                browseFetchFilters.maxLikes = Number.isFinite(maxLikes) && maxLikes >= 0 ? maxLikes : null;
+                setIfDifferent(discoverMinLikes, String(browseFetchFilters.minLikes || 0));
+                setIfDifferent(discoverMaxLikes, browseFetchFilters.maxLikes == null ? '' : String(browseFetchFilters.maxLikes));
+                updateMirrorRunningStats();
+                return;
+            }
+            browseFetchFilters.maxLikes = null;
             browseFetchFilters.include  = parseTerms(includeEl.value);
             browseFetchFilters.exclude  = parseTerms(excludeEl.value);
             browseFetchFilters.saveTxt  = bfSaveTxt.checked;
+            browseFetchFilters.version = 'all';
+            browseFetchFilters.feed = 'explore';
+            browseFetchFilters.dateFrom = '';
+            browseFetchFilters.dateTo = '';
+            browseFetchFilters.ratios = new Set();
             syncBfFilterControls(source);
             updateMirrorRunningStats();
         };
@@ -4836,14 +5368,54 @@
         bfExclude.addEventListener('input',  () => syncBfFilters('start'));
         bfSaveTxt.addEventListener('change', () => syncBfFilters('start'));
         mirrorMinLikes.addEventListener('input', () => syncBfFilters('mirror'));
+        mirrorMaxLikes.addEventListener('input', () => syncBfFilters('mirror'));
         mirrorInclude.addEventListener('input',  () => syncBfFilters('mirror'));
         mirrorExclude.addEventListener('input',  () => syncBfFilters('mirror'));
         syncBfFilterControls();
+
+        const syncDiscoverFilters = () => {
+            browseFetchFilters.version = discoverVersion.value || 'v2';
+            browseFetchFilters.feed = discoverFeed.value || 'explore';
+            browseFetchFilters.minLikes = Math.max(0, parseInt(discoverMinLikes.value) || 0);
+            const maxLikes = parseInt(discoverMaxLikes.value);
+            browseFetchFilters.maxLikes = Number.isFinite(maxLikes) && maxLikes >= 0 ? maxLikes : null;
+            browseFetchFilters.maxCreators = Math.max(0, parseInt(discoverMaxCreators.value) || 0);
+            browseFetchFilters.include = parseTerms(discoverInclude.value);
+            browseFetchFilters.exclude = parseTerms(discoverExclude.value);
+            browseFetchFilters.dateFrom = discoverDateFrom.value || '';
+            browseFetchFilters.dateTo = discoverDateTo.value || '';
+            browseFetchFilters.ratios = parseRatios(discoverRatios.value);
+            browseFetchFilters.includeChars = discoverChars.checked;
+            browseFetchFilters.keepPolling = discoverPoll.checked;
+            browseFetchFilters.saveTxt = discoverSaveTxt.checked;
+            if (browseFetchFilters.version === 'v1' && browseFetchFilters.feed === 'top') {
+                browseFetchFilters.feed = 'explore';
+                discoverFeed.value = 'explore';
+            }
+            setIfDifferent(mirrorMinLikes, String(browseFetchFilters.minLikes || 0));
+            setIfDifferent(mirrorMaxLikes, browseFetchFilters.maxLikes == null ? '' : String(browseFetchFilters.maxLikes));
+            updateMirrorRunningStats();
+        };
+        [
+            discoverVersion, discoverFeed, discoverMinLikes, discoverMaxLikes, discoverMaxCreators,
+            discoverInclude, discoverExclude, discoverDateFrom, discoverDateTo, discoverRatios,
+            discoverChars, discoverPoll, discoverSaveTxt,
+        ].forEach(el => el.addEventListener(el.type === 'checkbox' || el.tagName === 'SELECT' ? 'change' : 'input', syncDiscoverFilters));
+        syncDiscoverFilters();
 
         bfPick.addEventListener('click', async () => {
             try {
                 browseFetchBaseDir = await window.showDirectoryPicker();
                 bfFolder.textContent = browseFetchBaseDir.name + '/';
+                if (discoverFolder) discoverFolder.textContent = browseFetchBaseDir.name + '/';
+            } catch { /* user cancelled */ }
+        });
+
+        discoverPick.addEventListener('click', async () => {
+            try {
+                browseFetchBaseDir = await window.showDirectoryPicker();
+                discoverFolder.textContent = browseFetchBaseDir.name + '/';
+                if (bfFolder) bfFolder.textContent = browseFetchBaseDir.name + '/';
             } catch { /* user cancelled */ }
         });
 

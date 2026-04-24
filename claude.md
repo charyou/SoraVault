@@ -331,3 +331,287 @@ Important follow-up consideration:
   summary.
 - The running-view controls use unique `sdl-mirror-*` IDs to avoid duplicate
   DOM IDs while preserving the existing `sdl-bf-*` setup controls.
+
+## 2026-04-24 Follow-up: Discover & Download Work-In-Progress
+
+Conversation summary:
+
+- User requested a new first-panel mode named **Discover & Download**. The
+  intent is similar to Mirror Mode's live download behavior, but active rather
+  than passive: scan Explore/Top feeds, discover new creators, fetch each
+  creator's posts and characters, and download matching content as it is found.
+- Requested configurable filters:
+  - Include keywords.
+  - Exclude keywords.
+  - Min likes / max likes.
+  - Sora 1 or Sora 2.
+  - Explore vs Top, where Top is Sora 2 only.
+  - Quick-win filters using data already available.
+- User later clarified UI behavior:
+  - Discover should choose either Sora 1 or Sora 2, not both.
+  - Explore/Top should become a button/toggle, not a dropdown.
+  - Top should be disabled/greyed out for Sora 1.
+  - Filters should not be duplicated awkwardly between the start view and
+    running view. Prefer full filters before start; running view can keep only
+    likes-range controls if needed.
+
+Implementation progress in `src/core.js`:
+
+- Added a real `discover` start mode next to `regular`, `creator`, and
+  `mirror`.
+- Reused the existing Browse & Fetch / Mirror downloader pipeline:
+  - Separate root folder: `discover_download/`.
+  - Separate append-only manifest: `discover_manifest.json`.
+  - Uses the same queue, file writing, prompt sidecars, de-dupe, and worker
+    control path as Mirror Mode.
+- Added Discover-specific state:
+  - `discoverRunning`, `discoverLoopPromise`, `discoverRunToken`,
+    `discoverDrainPromise`.
+  - `discoverSeenCreators`, `discoverCreatorQueue`, and `discoverStats`.
+  - Run-token guard prevents old polling loops from mutating a new run after
+    stop/restart.
+- Added Discover filters to `browseFetchFilters`:
+  - `version`, `feed`, `minLikes`, `maxLikes`, `include`, `exclude`,
+    `dateFrom`, `dateTo`, `ratios`, `includeChars`, `maxCreators`,
+    `keepPolling`, `saveTxt`.
+- Added a first-panel Discover card with controls for version, feed, likes,
+  max creators, include/exclude keywords, date range, aspect ratios, character
+  inclusion, polling, prompt sidecars, and folder selection.
+- Added a running-state Discover view by reusing the Mirror running screen:
+  - Dynamic labels switch between Mirror and Discover.
+  - Discover running summary shows saved count, creator discovery count, queue,
+    failures, and active filters.
+  - Running view was adjusted to show likes range for Discover and hide the
+    Mirror include/exclude textareas.
+- Added endpoint/probe logging for Discover, including status, response keys,
+  and item-array counts.
+- Built `dist/SoraVault.user.js` and `dist/chrome-extension/content.js` from
+  `src/core.js` using the Node equivalent of `build.py`, because `python` was
+  not available on PATH in this shell.
+- Verification performed after implementation iterations:
+  - `node --check src\core.js`
+  - `node --check dist\chrome-extension\content.js`
+  - `node --check dist\SoraVault.user.js`
+  - `git diff --check`
+
+Important endpoint discoveries and corrections:
+
+- Initial guessed Sora 2 endpoints failed:
+  - `/backend/project_y/explore?limit=20`
+  - `/backend/project_y/feed?limit=20`
+  - `/backend/project_y/discover?limit=20`
+  - These produced HTTP 404/500.
+- Attempting `/backend/search` directly for Discover produced HTTP 405. It is
+  still useful for Mirror/profile-search passive capture, but not as the direct
+  Discover feed fetch.
+- User captured the concrete Sora 2 Explore feed endpoint:
+
+```text
+GET /backend/project_y/feed?limit=8&cut=nf2
+```
+
+- Sora 2 Explore response shape:
+
+```js
+{
+  items: [
+    {
+      post: {
+        id,
+        posted_at,
+        updated_at,
+        like_count,
+        view_count,
+        text,
+        attachments: [
+          {
+            id,
+            generation_id,
+            generation_type,
+            url,
+            downloadable_url,
+            download_urls: { watermark, no_watermark, endcard_watermark },
+            width,
+            height,
+            duration_s,
+            task_id,
+            encodings: {
+              source: { path, size, duration_secs, ssim },
+              source_wm: { path, size, duration_secs, ssim },
+              thumbnail: { path },
+              md: { path, size },
+              ld: { path, size },
+              gif: { path }
+            }
+          }
+        ],
+        permalink,
+        discovery_phrase,
+        srt_url,
+        vtt_url
+      },
+      profile: {
+        user_id,
+        username,
+        follower_count,
+        post_count,
+        likes_received_count,
+        character_count,
+        permalink,
+        display_name
+      },
+      reposter_profile
+    }
+  ],
+  cursor,
+  debug_info
+}
+```
+
+- User captured the concrete Sora 1 Explore feed endpoint:
+
+```text
+GET /backend/feed/home?limit=24&after=<encoded cursor>
+```
+
+- Sora 1 Explore response shape:
+
+```js
+{
+  data: [
+    {
+      id,
+      task_id,
+      created_at,
+      deleted_at,
+      url,
+      seed,
+      can_download,
+      download_status,
+      is_favorite,
+      is_liked,
+      is_public,
+      like_count,
+      encodings: {
+        source: { path, size, width, height, duration_secs, ssim, codec },
+        md: { path, size, width, height, duration_secs, ssim, codec },
+        ld: { path, size, width, height, duration_secs, ssim, codec },
+        thumbnail: { path },
+        link_thumbnail: { path },
+        spritesheet: { path },
+        source_wm,
+        md_wm,
+        ld_wm,
+        endcard_wm
+      },
+      width,
+      height,
+      n_frames,
+      prompt,
+      title,
+      actions,
+      operation,
+      model,
+      user: { id, username },
+      task_type,
+      quality
+    }
+  ],
+  last_id,
+  has_more
+}
+```
+
+- Current `src/core.js` was updated to use:
+  - Sora 2 Explore: `/backend/project_y/feed?limit=8&cut=nf2` with `cursor`.
+  - Sora 1 Explore: `/backend/feed/home?limit=24` with `after`.
+  - Sora 2 Top currently has two unverified probe candidates:
+    - `/backend/project_y/feed?limit=8&cut=top`
+    - `/backend/project_y/feed?limit=8&cut=nf2&feed=top`
+
+Known current status:
+
+- Sora 2 Discover should be close, because its endpoint and response shape match
+  existing `ingestV2Page()` expectations.
+- Sora 1 Discover is **not working yet**. The endpoint is known, but the direct
+  ingestion path needs rework for the Sora 1 Explore `data[]` shape and
+  pagination contract.
+- The direct Sora 1 response is not the same as regular backup
+  `/backend/v2/list_tasks`, so `ingestV1Page()` is not the right parser for it
+  without adaptation. `normaliseOpportunisticItem()` can parse some flat
+  generation-like items, but Discover should get a dedicated Sora 1 feed parser
+  or a generalized normalizer with explicit tests against this shape.
+
+Open tasks for the next session:
+
+- Reimplement Sora 1 Discover fetching:
+  - Use `/backend/feed/home?limit=24`.
+  - Paginate using `after=<last_id>` while `has_more === true`.
+  - Parse `data[]` items directly.
+  - Prefer `encodings.source.path` for download URL, then fallback to
+    `downloadable_url`, `download_urls.watermark`, then `url`.
+  - Set `mode: 'v1'`, source such as `v1_discover`, `genId: id`,
+    `taskId: task_id`, `date: created_at.slice(0, 10)`, prompt, width, height,
+    ratio, quality, operation, model, seed, `likeCount`, author from
+    `user.username`, and `isVideo` from `task_type`/`n_frames`/URL extension.
+  - Ensure `getFileExt()` labels Sora 1 Explore videos as `.mp4`.
+  - Decide folder behavior, likely `discover_download/sora1_explore/`.
+- Verify and lock down the Sora 2 Top endpoint:
+  - Capture exact DevTools request when opening `https://sora.chatgpt.com/explore?feed=top`.
+  - Replace the two guessed Top probes with the exact endpoint and params.
+- Convert Explore/Top from dropdown to button/toggle:
+  - Use a segmented control: `Explore` and `Top`.
+  - `Explore` available for Sora 1 and Sora 2.
+  - `Top` enabled only when Sora 2 is selected.
+  - When Sora 1 is selected, grey out Top and force Explore.
+- Clean up Discover filter UX:
+  - Keep full filters on the Discover start card.
+  - Running view should either be read-only summary or allow only min/max likes.
+  - If min/max likes are editable while running, sync both start-card and
+    running-view inputs without changing other filters.
+- Add per-creator "Top N" support:
+  - User specifically wants "top 10" per creator, potentially per character.
+  - This likely requires fetching the creator's full library first, sorting by
+    `likeCount`, then queueing only top N posts.
+  - Need to decide whether top N applies to:
+    - Creator posts only.
+    - Each character separately.
+    - Creator posts + character posts combined.
+  - Also decide whether "top N" should be based only on posts that pass keyword,
+    date, ratio, and likes filters.
+- Add tests or local validation harness for parsers:
+  - A small fixture-based JS test would prevent endpoint-shape regressions.
+  - Include fixtures for Sora 2 `project_y/feed`, Sora 1 `feed/home`, and older
+    `/backend/search` wrapper rows.
+  - At minimum, expose pure helper functions for normalizing feed items and run
+    them with `node --check` plus simple assertions.
+- Reduce log noise:
+  - Keep useful endpoint/status logging while Discover is beta.
+  - Avoid logging every page as a large repetitive probe once the endpoint is
+    confirmed working.
+- Review manifest semantics:
+  - Discover uses separate `discover_manifest.json`, but confirm switching
+    between Sora 1/Sora 2 or Explore/Top in the same folder behaves as expected.
+  - Confirm manifest entries include enough metadata to audit origin:
+    `mode`, feed type, creator, author, captured path, like count, folder,
+    filename.
+- Review creator discovery boundaries:
+  - Sora 2 feed items expose `profile`; Discover queues these creators and then
+    fetches creator posts/characters through existing Creator Backup logic.
+  - Sora 1 feed items expose `user`, but Sora 1 should not trigger Sora 2
+    creator fetches. Keep creator discovery disabled for Sora 1 unless a
+    reliable Sora 1 public creator endpoint is identified.
+- Review performance/rate-limit behavior:
+  - Direct feed polling + creator crawling + media downloads can create a lot
+    of requests. Confirm default Balanced (4 workers) is acceptable.
+  - Consider separate limits for feed pages, creator fetch workers, and media
+    download workers.
+- Confirm folder structure:
+  - Current Discover root is `discover_download/`.
+  - Desired likely structure:
+    - `discover_download/sora2_explore/`
+    - `discover_download/sora2_top/`
+    - `discover_download/sora2_creators/<creator>/`
+    - `discover_download/sora2_creators/<creator>/characters/<character>/`
+    - `discover_download/sora1_explore/`
+- Update README/CHANGELOG only after the feature is validated in-browser.
