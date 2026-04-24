@@ -676,6 +676,9 @@
     // Pull a minimal entry out of an unknown-shape post/task object. Returns null if nothing usable.
     function normaliseOpportunisticItem(raw) {
         if (!raw || typeof raw !== 'object') return null;
+        if (raw.generation && typeof raw.generation === 'object') {
+            raw = raw.generation;
+        }
         // v2 post-shaped
         const post = raw.post ?? raw;
         const att  = Array.isArray(post.attachments) ? post.attachments[0] : null;
@@ -706,12 +709,17 @@
             const ratio = (w && h) ? (() => { const g = gcd(w, h); return `${w/g}:${h/g}`; })() : null;
             const taskType = (raw.task_type ?? '').toLowerCase();
             const isVideo  = taskType.includes('vid') || (raw.n_frames ?? 1) > 1;
+            const directUrl = raw.encodings?.source?.path
+                           ?? raw.downloadable_url
+                           ?? raw.download_urls?.watermark
+                           ?? null;
             return {
                 mode: 'v1', source: 'v1_opportunistic', genId,
                 taskId: raw.task_id ?? '',
                 date: (raw.created_at ?? '').slice(0, 10),
                 prompt: raw.prompt ?? '',
                 pngUrl: String(raw.url).replace(/&amp;/g, '&'),
+                downloadUrl: directUrl ? String(directUrl).replace(/&amp;/g, '&') : null,
                 width: w, height: h, ratio,
                 quality: raw.quality ?? null, operation: raw.operation ?? null,
                 model: raw.model ?? null, seed: raw.seed ?? null,
@@ -805,7 +813,7 @@
         const url = await getDownloadUrl(item);
         if (!url) throw new Error('no download URL');
 
-        const ext = item.isVideo || item.mode === 'v2' ? 'mp4' : 'png';
+        const ext = getFileExt(item).replace(/^\./, '');
         const base = buildBase(item) || key;
         const filename = `${base}.${ext}`;
 
@@ -1438,8 +1446,8 @@
     // DOWNLOAD HELPERS
     // =====================================================================
     async function getDownloadUrl(item) {
+        if (item.downloadUrl) return item.downloadUrl;
         if (item.mode === 'v2') {
-            if (item.downloadUrl) return item.downloadUrl;
             if (item.postId) {
                 try {
                     const r = await _fetch(
