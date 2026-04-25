@@ -127,6 +127,7 @@
         { id: 'v2_cameos',        icon: '👤',   label: 'Cameos',        sub: 'V2 posts featuring you', group: 'v2' },
         { id: 'v2_cameo_drafts',  icon: '👤📋', label: 'Cameo drafts',  sub: 'V2 drafts featuring you', group: 'v2' },
         { id: 'v2_my_characters', icon: '🎭',   label: 'Characters',    sub: 'V2 your characters (preview)', group: 'v2' },
+        { id: 'v2_remix_chains',  icon: '⛓',   label: 'Remix chains',  sub: 'V2 remix relationships + related media', group: 'v2' },
     ];
 
     // Human-readable labels for filter chips — keyed by source ID
@@ -140,6 +141,7 @@
         v2_cameos:       'Cameos',
         v2_cameo_drafts: 'Cameo drafts',
         v2_my_characters: 'Characters',
+        v2_remix_chains: 'Remix chains',
         v2_creator:      'Creators',
         v2_remix_children: 'Remix children',
         v2_remix_parents:  'Remix parents',
@@ -288,12 +290,12 @@
 
     // Remix enrichment state. Remix media is related to the user's videos, but stored
     // under its own root so it does not become indistinguishable from account backups.
-    let remixChainMode           = 'off'; // off | metadata | media
+    let remixChainMode           = 'off'; // off | media
     const remixChainRecords      = [];
     const remixChainRecordKeys   = new Set();
 
     // Source enable/disable state — all enabled by default except preview sources
-    const enabledSources = new Set(SCAN_SOURCES.map(s => s.id));
+    const enabledSources = new Set(SCAN_SOURCES.filter(s => s.id !== 'v2_remix_chains').map(s => s.id));
 
     // Per-source scan status
     const srcStatus = {};
@@ -957,7 +959,10 @@
                             remixRootPostId: rootPostId,
                             remixParentPath: parentPath,
                         });
-                        if (entry) collected.set(key, entry);
+                        if (entry) {
+                            collected.set(key, entry);
+                            refreshScanCount();
+                        }
                     }
                 }
                 found++;
@@ -997,7 +1002,10 @@
                     remixRootPostId: candidate.rootPostId ?? parentWrapper.post?.root_post_id ?? parentPostId,
                     remixParentPath: candidate.parentPath,
                 });
-                if (entry) collected.set(key, entry);
+                if (entry) {
+                    collected.set(key, entry);
+                    refreshScanCount();
+                }
             }
         }
         return 1;
@@ -1008,9 +1016,12 @@
         const baseItems = [...collected.values()].filter(item =>
             item.mode === 'v2' && !String(item.source || '').startsWith('v2_remix_')
         );
-        if (!baseItems.length) return;
+        if (!baseItems.length) {
+            log('Remix chains: no Sora 2 items available to enrich');
+            return;
+        }
 
-        log(`Remix chains: scanning ${baseItems.length} Sora 2 items (${remixChainMode === 'media' ? 'metadata + media' : 'metadata only'})`);
+        log(`Remix chains: scanning ${baseItems.length} Sora 2 items (metadata + media)`);
         let downstream = 0, parents = 0;
         for (const item of baseItems) {
             if (stopRequested) break;
@@ -1029,6 +1040,11 @@
         } else {
             log('Remix chains: no remix relationships found');
         }
+    }
+
+    async function fetchAllV2RemixChains() {
+        await enrichRemixChains();
+        setSrcStatus('v2_remix_chains', stopRequested ? 'skipped' : 'done');
     }
 
     function refreshScanCount() {
@@ -1671,7 +1687,7 @@
     }
 
     function applyV2GeoBlock() {
-        const v2Ids = ['v2_profile', 'v2_drafts', 'v2_liked', 'v2_cameos', 'v2_cameo_drafts', 'v2_my_characters'];
+        const v2Ids = ['v2_profile', 'v2_drafts', 'v2_liked', 'v2_cameos', 'v2_cameo_drafts', 'v2_my_characters', 'v2_remix_chains'];
         v2Ids.forEach(id => {
             const cb  = document.getElementById('sdl-src-cb-' + id);
             const row = document.getElementById('sdl-src-row-' + id);
@@ -1708,11 +1724,6 @@
         if (badge) {
             badge.textContent = isV2Supported ? '✓ available' : '⚠ geo-blocked · Enable a VPN to US to access Sora 2';
             badge.className   = 'sdl-src-group-badge ' + (isV2Supported ? 'badge-ok' : 'badge-blocked');
-        }
-        const remixSelect = document.getElementById('sdl-remix-mode');
-        if (remixSelect) {
-            remixSelect.disabled = !isV2Supported;
-            if (!isV2Supported) remixSelect.value = 'off';
         }
         const creatorCard = document.getElementById('sdl-mode-creator');
         if (creatorCard) creatorCard.classList.toggle('v2-disabled', !isV2Supported);
@@ -2057,6 +2068,7 @@
             v2_cameos:       () => fetchAllV2('/backend/project_y/profile_feed/me?limit=8&cut=appearances', 'v2_cameos'),
             v2_cameo_drafts: () => fetchAllV2('/backend/project_y/profile/drafts/cameos?limit=15', 'v2_cameo_drafts'),
             v2_my_characters: fetchAllV2MyCharacters,
+            v2_remix_chains:  fetchAllV2RemixChains,
         };
 
         for (const src of SCAN_SOURCES) {
@@ -2068,11 +2080,6 @@
             setSrcStatus(src.id, 'active');
             await FETCH_MAP[src.id]();
         }
-
-        if (activeStartMode === 'regular') {
-            await enrichRemixChains();
-        }
-
     }
 
     function renderCreatorScanProgress(activeName = null) {
@@ -3792,7 +3799,7 @@
         cachedUserId = null;
         remixChainRecords.length = 0;
         remixChainRecordKeys.clear();
-        remixChainMode = document.getElementById('sdl-remix-mode')?.value ?? 'off';
+        remixChainMode = enabledSources.has('v2_remix_chains') ? 'media' : 'off';
         resetFilters();
 
         SCAN_SOURCES.forEach(s => setSrcStatus(s.id, enabledSources.has(s.id) ? 'pending' : 'idle'));
@@ -5234,14 +5241,11 @@ select.sdl-bf-input { min-height:28px; resize:none; }
 .sdl-src-icon { grid-area:icon; font-size:14px; line-height:1; flex-shrink:0; }
 .sdl-src-name { grid-area:name; font-size:13px; font-weight:700; color:rgba(255,255,255,0.82); min-width:0; }
 .sdl-src-sub  { grid-area:sub; font-size:11px; color:rgba(255,255,255,0.34); white-space:normal; line-height:1.25; }
-.sdl-remix-setting {
-  grid-column:1 / -1; display:grid; grid-template-columns:1fr minmax(150px, 210px);
-  align-items:center; gap:10px; padding:10px 11px;
-  border:0.5px solid rgba(255,255,255,0.08); border-radius:8px;
-  background:rgba(255,255,255,0.018);
+.sdl-remix-row {
+  border-color:rgba(251,191,36,0.2);
+  background:rgba(251,191,36,0.035);
 }
-.sdl-remix-copy { display:flex; flex-direction:column; gap:3px; min-width:0; }
-.sdl-remix-setting .sdl-bf-input { width:100%; margin:0; }
+.sdl-remix-row .sdl-src-sub { color:rgba(251,191,36,0.66); }
 .sdl-geo-tag  {
   font-size:9px; padding:1.5px 6px; border-radius:20px;
   background:rgba(251,191,36,0.1); color:rgba(251,191,36,0.7);
@@ -5871,20 +5875,11 @@ select.sdl-bf-input { min-height:28px; resize:none; }
           <span class="sdl-src-name">Characters</span>
           <span class="sdl-src-sub">Your characters</span>
         </label>
-      </div>
-
-      <div class="sdl-src-group">
-        <div class="sdl-src-group-hd">Remix chains</div>
-        <label class="sdl-remix-setting">
-          <span class="sdl-remix-copy">
-            <span class="sdl-src-name">Remix enrichment</span>
-            <span class="sdl-src-sub">Stores relationship data under sora_v2_remixes, separate from your backups.</span>
-          </span>
-          <select id="sdl-remix-mode" class="sdl-bf-input">
-            <option value="off" selected>Off</option>
-            <option value="metadata">Metadata only</option>
-            <option value="media">Metadata + related media</option>
-          </select>
+        <label class="sdl-src-row sdl-remix-row" id="sdl-src-row-v2_remix_chains" title="Can add many related creator videos. Stored separately under sora_v2_remixes.">
+          <input type="checkbox" id="sdl-src-cb-v2_remix_chains">
+          <span class="sdl-src-icon">⛓</span>
+          <span class="sdl-src-name">Remix chains</span>
+          <span class="sdl-src-sub">Metadata + related media. Can be huge.</span>
         </label>
       </div>
 
@@ -6510,13 +6505,6 @@ select.sdl-bf-input { min-height:28px; resize:none; }
         });
 
         // ── Settings / Expert drawers ──────────────────────────────────────
-        const remixModeSelect = document.getElementById('sdl-remix-mode');
-        if (remixModeSelect) {
-            remixModeSelect.addEventListener('change', () => {
-                remixChainMode = remixModeSelect.value || 'off';
-            });
-        }
-
         function setStartMode(mode) {
             if (mode === 'creator' && !isV2Supported) {
                 setStatus('Creator Backup requires Sora 2 access');
