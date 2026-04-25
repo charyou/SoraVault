@@ -41,6 +41,7 @@ Supported sources:
 
 - Sora 1 generated library.
 - Sora 1 liked content.
+- Sora 1 folders/collections.
 - Sora 2 published profile videos.
 - Sora 2 drafts.
 - Sora 2 liked videos.
@@ -695,3 +696,181 @@ Final caveats to keep visible:
 - Watermark removal remains optional, disabled by default, and backed by the
   third-party `soravdl.com` proxy.
 - Discover & Download uses direct downloads and does not use watermark removal.
+
+## 2026-04-25 Follow-up: V1 Folders, Discovery Throttling, Remix Sprint
+
+Confirmed from `Sora_API_Documentation_v4.md`, the 2026-04-25 HAR
+`explore and collections.har`, and live validation:
+
+- Sora 1 "folders" are the V1 collections API.
+- List folders:
+
+```text
+GET /backend/collections?limit=100
+```
+
+- Response shape:
+
+```js
+{
+  data: [
+    {
+      id: "coll_...",
+      alias: null,
+      title: "Recipes",
+      user_id: "user-...",
+      created_at: "2025-04-01T12:31:43.873463Z"
+    }
+  ],
+  last_id: "coll_...",
+  has_more: false
+}
+```
+
+- Fetch folder media:
+
+```text
+GET /backend/collections/{collection_id}/generations?limit=10
+GET /backend/collections/{collection_id}/generations?limit=10&after={gen_id}
+```
+
+- Folder generation pages use the same V1 generation object shape as liked
+  collections: `data`, `last_id`, `has_more`.
+- `social_favorites` remains a separate likes source and should not be mixed
+  into the user folder source.
+- Implemented source: `v1_collections`.
+- Implemented output folder: `sora_v1_folders/<folder-title>/`.
+- Folder entries store `collectionId` and `collectionTitle`, and prompt
+  sidecars include a `Folder` line.
+- UI now prefetches `/backend/collections?limit=100` after auth and displays
+  the folder count on the first screen before scan.
+- Bug note: early quiet prefetches must not cache `0 folders` if auth/runtime
+  headers are not ready. Only a successfully parsed collections response should
+  set `v1CollectionsLoaded = true`.
+
+Additional V1 discovery findings from the same HAR:
+
+- Sora 1 Explore direct feed:
+
+```text
+GET /backend/feed/home?limit=24
+GET /backend/feed/home?limit=24&after={encoded_last_id}
+```
+
+- Response shape is `data`, `last_id`, `has_more`; `last_id` is the encoded
+  cursor to pass as `after`, not the last raw generation id.
+- Feed requests include `openai-sentinel-token`.
+- Sentinel generation flow observed:
+
+```text
+POST https://chatgpt.com/backend-api/sentinel/req
+body includes: { flow: "sora_list_feed" }
+```
+
+- Discovery now waits between direct feed requests (`DISCOVER_REQUEST_DELAY_MS`)
+  and creator crawl requests (`DISCOVER_CREATOR_DELAY_MS`), retries
+  400/429/5xx, refreshes hidden warm frames when a V1 feed sentinel is rejected,
+  and runs Discover downloads/workers one speed tier below the selected UI
+  preset.
+
+### Next Implementation: Remix Enrichment
+
+Goal: preserve remix relationship data and optionally download related remix
+media into separate folders without mixing it into the main source folders.
+
+Known endpoints and fields:
+
+- List downstream remixes of a V2 post:
+
+```text
+GET /backend/project_y/post/{s_id}/remix_feed?cursor={cursor}
+```
+
+- Response is cursor-paginated and should be handled like other V2 feed
+  responses: `{ items, cursor }`.
+- Do not rely on `post.remix_posts`; documentation/HAR notes say it is often
+  empty even when `remix_count > 0`.
+- Fetch single post / tree fallback:
+
+```text
+GET /backend/project_y/post/{s_id}
+GET /backend/project_y/post/{s_id}/tree?limit=20&max_depth=1
+```
+
+- Parent/origin data can appear in:
+  - `post.parent_post`
+  - `post.parent_post_id`
+  - `post.root_post_id`
+  - `post.parent_path`
+  - `creation_config.remix_target_post`
+  - `creation_config.remix_target_id`
+  - `creation_config.remix_config`
+- `creation_config.remix_target_post` and `post.parent_post` may be full
+  wrappers shaped like `{ post, profile, reposter_profile }`.
+- Original/remix media URL extraction should reuse existing V2 fallback order:
+  `attachment.encodings.source.path`, then `attachment.downloadable_url`, then
+  `attachment.download_urls.watermark`, then `attachment.url`, with tree
+  fallback if needed.
+
+Proposed source IDs and folder structure:
+
+- `v2_remix_children`: remixes made from one of the user's posts.
+  - Folder: `sora_v2_remixes/downstream/<root-or-parent-post-id>/`.
+- `v2_remix_parents`: source/original posts that the user's posts remixed.
+  - Folder: `sora_v2_remixes/parents/<creator-or-unknown>/`.
+- `v2_remix_chains`: optional metadata-only chain manifests when media is not
+  downloaded.
+  - Folder/file: `sora_v2_remixes/chains/remix_chains.json`.
+
+Implementation plan:
+
+- Add a setting under Regular Backup for Remix enrichment:
+  - Off by default if scan speed is a concern.
+  - Options can start simple: `metadata only` vs `metadata + media`.
+- During V2 profile/drafts/liked/cameo scans, detect candidate posts:
+  - Downstream candidates: posts with `remix_count > 0` or `num_direct_children > 0`.
+  - Parent candidates: posts/drafts whose raw metadata has `parent_post_id`,
+    `root_post_id`, `parent_post`, `creation_config.remix_target_post`, or
+    `creation_config.remix_target_id`.
+- For downstream:
+  - Call `/post/{id}/remix_feed`.
+  - Normalize returned post wrappers through existing V2 normalization.
+  - Set source `v2_remix_children`.
+  - Add metadata fields: `remixRootPostId`, `remixParentPostId`,
+    `remixDepth`, `remixDirection: "child"`, `remixSourcePostId`.
+- For parents:
+  - Prefer embedded `parent_post` / `creation_config.remix_target_post`.
+  - If only an id exists, call `/post/{id}` or `/post/{id}/tree`.
+  - Normalize as `v2_remix_parents`.
+  - Add metadata fields: `remixDirection: "parent"`, `remixChildPostId`,
+    `remixRootPostId`, `remixParentPath`.
+- Write chain metadata even when media download is disabled:
+  - `childPostId`
+  - `parentPostId`
+  - `rootPostId`
+  - `parentPath`
+  - `source`
+  - `creator username`
+  - `prompt/text`
+  - `download filename if downloaded`
+  - raw wrapper snapshot where available
+- Rate-limit remix enrichment separately:
+  - Reuse `fetchWithRetry`.
+  - Add a small page delay, at least `600-1200ms`, because remix expansion can
+    multiply request count quickly.
+- Dedupe carefully:
+  - Main scan entries should remain keyed by post id as today.
+  - Remix media can be separate entries only when source differs, similar to V1
+    folder behavior, so a post can exist both in `v2_profile` and
+    `v2_remix_children` without losing separate folder placement.
+- UI filter chips should show separate categories for `Remix children` and
+  `Remix parents` only when those sources are present.
+
+Risks / open checks:
+
+- Confirm whether `/post/{id}/remix_feed` requires extra sentinel/auth headers
+  beyond normal `project_y` feed headers.
+- Confirm max useful pagination depth and whether very popular posts need a
+  user-configurable remix limit.
+- Confirm whether parent media should always be downloaded or only metadata by
+  default to avoid unexpectedly archiving many third-party originals.

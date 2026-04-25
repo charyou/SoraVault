@@ -1483,6 +1483,7 @@
         updateV1CollectionsBadge();
         v1CollectionsPromise = (async () => {
             const all = [];
+            let sawUsableResponse = false;
             let afterId = null;
             let hasMore = true;
             while (hasMore && !stopRequested) {
@@ -1502,12 +1503,16 @@
                     if (!quiet) log('V1 folders: collection list JSON parse error');
                     break;
                 }
+                sawUsableResponse = true;
                 const page = Array.isArray(data?.data) ? data.data.filter(isBackupV1Collection) : [];
                 all.push(...page);
                 hasMore = data?.has_more === true;
                 afterId = data?.last_id ?? null;
                 if (hasMore && !afterId) break;
                 if (hasMore) await sleep(120);
+            }
+            if (!sawUsableResponse) {
+                throw new Error('V1 folders metadata unavailable');
             }
             v1CollectionsMeta = all;
             v1CollectionsLoaded = true;
