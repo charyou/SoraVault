@@ -1,6 +1,6 @@
 # SoraVault Project Brief
 
-Last updated: 2026-04-24
+Last updated: 2026-04-25
 
 ## Product Intent
 
@@ -26,8 +26,8 @@ uses Sora: clear, urgent, technically capable, and honest about limitations.
   is not easy to export manually.
 - People who need prompts and metadata beside media files for future reference.
 - Users in regions with only Sora 1 access.
-- Power users who want to back up public creator libraries or passively capture
-  what they browse.
+- Power users who want to back up public creator libraries, passively capture
+  what they browse, or actively discover feed content before shutdown.
 
 ## Feature Scope
 
@@ -46,7 +46,7 @@ Supported sources:
 - Sora 2 liked videos.
 - Sora 2 cameos.
 - Sora 2 cameo drafts.
-- User-owned character posts and appearances.
+- User-owned character posts, appearances, and drafts where Sora exposes them.
 
 Important positioning:
 
@@ -80,7 +80,7 @@ Behavior:
 - Adds extra time per video.
 - Can fail or be rate-limited.
 - Falls back to direct OpenAI/Sora download.
-- Not used by Mirror Mode.
+- Not used by Mirror Mode or Discover & Download.
 
 ### 4. Filters
 
@@ -147,18 +147,39 @@ Limitations:
 - Full page reload stops Mirror Mode.
 - Watermark removal is intentionally skipped.
 
-### 7. Future / Placeholder
+### 7. Discover & Download
 
-Discover & Download is a visible locked placeholder. Intended future direction:
-auto-discover creators and continuously download content matching rules. Do not
-implement this without a separate design pass.
+Discover & Download is an active discovery mode. It scans the selected Sora feed,
+discovers creators from feed responses, optionally crawls supported creator
+content, applies filters, and downloads matching media through the Browse & Fetch
+pipeline.
+
+Capabilities:
+
+- Separate root folder: `discover_download/`.
+- Separate manifest file: `discover_manifest.json`.
+- Sora 1 feed choices: Explore, Videos, Images.
+- Sora 2 feed choices: Explore and Top probing.
+- Include keywords, exclude keywords, min/max likes, date range, aspect ratios,
+  max creators, optional Sora 2 character crawling, polling, and prompt sidecars.
+- Running status with feed pages, discovered creators, creator queue, media
+  queue, workers, screened/matched/filtered counts, duplicates, known files, and
+  recent per-creator summaries.
+
+Critical limitation:
+
+- Discover only supports the Sora version currently being browsed, Sora 1 or
+  Sora 2. The user must choose the matching version in the Discover card before
+  starting. If the selected version does not match the current Sora browsing
+  runtime, discovery cannot use the correct feed state.
 
 ## Current UX Direction
 
 The first screen is an exclusive mode picker:
 
 - Regular Backup is active by default.
-- Creator Backup and Mirror Mode cannot be combined with Regular Backup.
+- Creator Backup, Mirror Mode, and Discover & Download cannot be combined with
+  Regular Backup.
 - Start Scan changes meaning based on the selected mode.
 - Advanced/log access should stay available without distracting normal users.
 
@@ -195,11 +216,10 @@ Release workflow:
 
 - `README.md` - public product description and SEO surface.
 - `CHANGELOG.md` - user-facing release notes.
-- `sprint/codes-sprint-2.7.0.md` - technical 2.7.0 changelist.
 - `src/core.js` - implementation source of truth.
 - `build.py` - no-dependency build script.
 - `.github/workflows/release.yml` - release automation.
-- `assets/new-features.gif` - 2.7 feature preview.
+- `assets/new-features.gif` - feature preview.
 - `assets/videothumbnail.png` - YouTube thumbnail.
 
 ## Implementation Contracts
@@ -207,16 +227,20 @@ Release workflow:
 - Do not split `src/core.js` casually; the build pipeline expects it.
 - `SCAN_SOURCES`, `SOURCE_LABELS`, and `SUBFOLDERS` are shared contracts.
 - Creator Backup items use `source: 'v2_creator'` and `creatorUsername`.
-- Mirror Mode uses `browseFetch*` state and `mirror_manifest.json`.
+- Mirror Mode and Discover & Download share `browseFetch*` downloader state.
+- Mirror Mode uses `mirror_browse/` and `mirror_manifest.json`.
+- Discover & Download uses `discover_download/` and `discover_manifest.json`.
 - Keep `genId` in default filenames; skip-existing depends on stable IDs.
 - Preserve user edits in dirty worktrees. Do not revert unrelated changes.
 
 ## Current Release State
 
-- Current release: `2.7.0`.
-- Release tag: `v2.7.0`.
-- 2.7.0 added the accordion first screen, standalone Creator Backup, Mirror Mode
-  start flow, likes range filters, README refresh, and updated handoff docs.
+- Current release: `3.0.0`.
+- Release tag: `v3.0.0`.
+- 3.0.0 is the final release. It includes the complete UI rehaul, Creator
+  Backup, Mirror Mode, Discover & Download, character drafts/downloads, cameo
+  downloads, live worker retuning, Sora 1/Sora 2 discovery fixes, README refresh,
+  and final changelog release notes.
 
 ## Open Tasks
 
@@ -529,20 +553,15 @@ GET /backend/feed/home?limit=24&after=<encoded cursor>
     - `/backend/project_y/feed?limit=8&cut=top`
     - `/backend/project_y/feed?limit=8&cut=nf2&feed=top`
 
-Known current status:
+Historical WIP status before the follow-up fixes:
 
-- Sora 2 Discover should be close, because its endpoint and response shape match
+- Sora 2 Discover was close because its endpoint and response shape matched
   existing `ingestV2Page()` expectations.
-- Sora 1 Discover is **not working yet**. The endpoint is known, but the direct
-  ingestion path needs rework for the Sora 1 Explore `data[]` shape and
-  pagination contract.
-- The direct Sora 1 response is not the same as regular backup
-  `/backend/v2/list_tasks`, so `ingestV1Page()` is not the right parser for it
-  without adaptation. `normaliseOpportunisticItem()` can parse some flat
-  generation-like items, but Discover should get a dedicated Sora 1 feed parser
-  or a generalized normalizer with explicit tests against this shape.
-
-Open tasks for the next session:
+- Sora 1 Discover initially needed parser and pagination work because the direct
+  feed response is not the same shape as regular backup
+  `/backend/v2/list_tasks`.
+- The follow-up completed the Sora 1 feed parser path by sending feed rows
+  through the opportunistic generation normalizer.
 
 Completed in follow-up:
 
@@ -586,16 +605,11 @@ Completed in follow-up:
   run in all same-origin frames, but subframes do not render a visible panel;
   they only capture and post feed header presence back to the top frame.
 
-Open tasks for the next session:
+Remaining non-release ideas:
 
-- Verify and lock down the Sora 2 Top endpoint:
-  - Capture exact DevTools request when opening `https://sora.chatgpt.com/explore?feed=top`.
-  - Replace the two guessed Top probes with the exact endpoint and params.
-- Clean up Discover filter UX:
-  - Keep full filters on the Discover start card.
-  - Running view should either be read-only summary or allow only min/max likes.
-  - If min/max likes are editable while running, sync both start-card and
-    running-view inputs without changing other filters.
+- Lock down the exact Sora 2 Top endpoint if Sora changes the current probe
+  behavior.
+- Further simplify Discover running filters if there is another UI pass.
 - Add per-creator "Top N" support:
   - User specifically wants "top 10" per creator, potentially per character.
   - This likely requires fetching the creator's full library first, sorting by
@@ -641,4 +655,43 @@ Open tasks for the next session:
     - `discover_download/sora2_creators/<creator>/`
     - `discover_download/sora2_creators/<creator>/characters/<character>/`
     - `discover_download/sora1_explore/`
-- Update README/CHANGELOG only after the feature is validated in-browser.
+- [x] Update README/CHANGELOG after the feature is validated in-browser.
+
+## 2026-04-25 Final 3.0 Release Notes
+
+Release documentation update:
+
+- `CHANGELOG.md` now contains the final `3.0.0` release section with a
+  non-technical opening, full feature summary, Discover & Download notes,
+  UI rehaul notes, and bug fixes.
+- `README.md` now presents SoraVault as version 3.0 and the final release,
+  with Discover & Download added beside Regular Backup, Creator Backup, and
+  Mirror Mode.
+- The public docs call out the most important Discover limitation: Discover
+  supports only the Sora version currently being browsed, Sora 1 or Sora 2.
+  Users must choose the matching version before starting discovery.
+- `claude.md` has been updated so Discover & Download is no longer described as
+  a placeholder.
+
+Final release scope:
+
+- Complete UI rehaul around exclusive modes.
+- Regular Backup with Sora 1, Sora 2, drafts, likes, cameos, cameo drafts, and
+  owned characters.
+- Creator Backup with validated public Sora 2 creator chips, persistence, posts,
+  character posts, and appearances.
+- Mirror Mode with passive browse capture and running-view filters.
+- Discover & Download with active feed discovery, creator discovery, filters,
+  dedicated folder/manifest, and running status.
+- Character draft and character appearance endpoint fixes.
+- Mirror `/backend/search` profile capture fixes.
+- Worker pool retuning and download stop behavior fixes.
+- README/CHANGELOG final-release messaging for the Sora shutdown.
+
+Final caveats to keep visible:
+
+- SoraVault depends on live Sora APIs and media URLs. It will not work after
+  those are unavailable.
+- Watermark removal remains optional, disabled by default, and backed by the
+  third-party `soravdl.com` proxy.
+- Discover & Download uses direct downloads and does not use watermark removal.
