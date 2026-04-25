@@ -108,6 +108,10 @@
     const BROWSE_FETCH_IDLE_SLEEP_MS       = 1500;
     const BROWSE_FETCH_MANIFEST_DEBOUNCE_MS = 8000;
     const DISCOVER_IDLE_SLEEP_MS           = 30000;
+    const DISCOVER_REQUEST_DELAY_MS        = 1200;
+    const DISCOVER_CREATOR_DELAY_MS        = 900;
+    const V1_COLLECTIONS_LIMIT             = 100;
+    const V1_COLLECTION_GENERATIONS_LIMIT  = 10;
 
     // =====================================================================
     // SCAN SOURCES  — single source of truth for all source-aware logic
@@ -115,6 +119,7 @@
     const SCAN_SOURCES = [
         { id: 'v1_library', icon: '📷', label: 'Library',  sub: 'V1 image library',    group: 'v1' },
         { id: 'v1_liked',   icon: '♡',  label: 'Likes',    sub: 'V1 liked content',         group: 'v1' },
+        { id: 'v1_collections', icon: '▣', label: 'Folders', sub: 'V1 collections',     group: 'v1' },
         { id: 'v2_profile',       icon: '🎬',   label: 'Videos',        sub: 'V2 published posts',    group: 'v2' },
         { id: 'v2_drafts',        icon: '📋',   label: 'Drafts',        sub: 'V2 all generated',      group: 'v2' },
         { id: 'v2_liked',         icon: '♡',    label: 'Liked',         sub: 'V2 liked videos',       group: 'v2' },
@@ -127,6 +132,7 @@
     const SOURCE_LABELS = {
         v1_library: 'Library',
         v1_liked:   'Likes (v1)',
+        v1_collections: 'Folders',
         v2_profile:      'Videos',
         v2_drafts:       'Drafts',
         v2_liked:        'Liked',
@@ -141,6 +147,7 @@
         v1_library: 'sora_v1_images',
         v1_videos:  'sora_v1_videos',
         v1_liked:   'sora_v1_liked',
+        v1_collections: 'sora_v1_folders',
         v2_profile:      'sora_v2_profile',
         v2_drafts:       'sora_v2_drafts',
         v2_liked:        'sora_v2_liked',
@@ -244,6 +251,11 @@
     const browseFetchDiscoveredEndpoints = new Set();
     const discoverOwnFetchUrls = new Set();
     const discoverWarmFrames = new Map();
+    let v1CollectionsMeta = [];
+    let v1CollectionsLoaded = false;
+    let v1CollectionsLoading = false;
+    let v1CollectionsPromise = null;
+    let v1CollectionsLastPrefetch = 0;
 
     // Discover & Download state
     let discoverRunning          = false;
@@ -564,6 +576,68 @@
         return { hasMore: hasMore && !!lastId, lastId };
     }
 
+    function ingestV1CollectionPage(data, collection, capturedPath = null) {
+        const items = data?.data;
+        if (!Array.isArray(items)) return { hasMore: false, lastId: null };
+
+        let added = 0;
+        items.forEach(gen => {
+            const genId = gen.id ?? '';
+            const collectionId = collection?.id ?? 'unknown';
+            const entryKey = `v1_collections:${collectionId}:${genId}`;
+            if (!genId || collected.has(entryKey)) return;
+            if (gen.deleted_at) return;
+            if (gen.download_status && gen.download_status !== 'ready') return;
+            if (!gen.url) return;
+
+            const previewUrl = gen.url.replace(/&amp;/g, '&');
+            const gw = gen.width  ?? null;
+            const gh = gen.height ?? null;
+            let ratio = null;
+            if (gw && gh) { const g = gcd(gw, gh); ratio = `${gw/g}:${gh/g}`; }
+
+            const taskType = (gen.task_type ?? '').toLowerCase();
+            const isVideo  = taskType.includes('vid') || (gen.n_frames ?? 1) > 1;
+            const author   = gen.user?.username ?? null;
+
+            const entry = {
+                mode: 'v1', source: 'v1_collections', genId,
+                taskId:    gen.task_id    ?? '',
+                date:      (gen.created_at ?? '').slice(0, 10),
+                prompt:    gen.prompt     ?? '',
+                pngUrl:    previewUrl,
+                width: gw, height: gh, ratio,
+                quality:   gen.quality   ?? null,
+                operation: gen.operation ?? null,
+                model:     gen.model     ?? null,
+                seed:      gen.seed      ?? null,
+                taskType,
+                nVariants: gen.n_variants ?? 1,
+                isVideo,
+                isFavorite: gen.is_favorite === true,
+                isLiked: gen.is_liked === true,
+                author,
+                likeCount: readLikeCount(gen),
+                canDownload: gen.can_download ?? null,
+                collectionId,
+                collectionTitle: collection?.title ?? 'Untitled folder',
+                _raw: { collection, ...gen },
+            };
+            collected.set(entryKey, entry);
+            maybeEnqueueBrowseFetch(entry, capturedPath);
+            added++;
+        });
+
+        if (added > 0) {
+            log(`+${added} folder items → ${collected.size} total`);
+            refreshScanCount();
+        }
+
+        const hasMore = data.has_more === true;
+        const lastId  = data.last_id ?? null;
+        return { hasMore: hasMore && !!lastId, lastId };
+    }
+
     // =====================================================================
     // DATA INGESTION — V2 (Videos / Profile + Drafts + Liked)
     // =====================================================================
@@ -689,6 +763,10 @@
         return item.genId || item.postId || null;
     }
 
+    function getDiscoverSpeedPreset() {
+        return SPEED_PRESETS[Math.max(0, speedIdx - 1)] ?? SPEED_PRESETS[0];
+    }
+
     function getBrowseFetchRootName() {
         return BROWSE_FETCH_ROOT_NAMES[browseFetchMode] || BROWSE_FETCH_ROOT_NAMES.mirror;
     }
@@ -699,7 +777,7 @@
 
     function getBrowseFetchWorkerLimit() {
         if (browseFetchMode !== 'discover') return BROWSE_FETCH_WORKERS;
-        const preset = SPEED_PRESETS[speedIdx] ?? SPEED_PRESETS[1];
+        const preset = getDiscoverSpeedPreset();
         return Math.max(1, preset.workers || BROWSE_FETCH_WORKERS);
     }
 
@@ -1374,6 +1452,89 @@
     // =====================================================================
     // API SCAN — FETCHERS
     // =====================================================================
+    function isBackupV1Collection(coll) {
+        const id = String(coll?.id ?? '');
+        const alias = String(coll?.alias ?? '');
+        if (!id) return false;
+        if (id === 'social_favorites' || alias === 'social_favorites') return false;
+        return true;
+    }
+
+    function updateV1CollectionsBadge() {
+        const badge = document.getElementById('sdl-v1-folders-count');
+        if (!badge) return;
+        if (v1CollectionsLoading && !v1CollectionsLoaded) {
+            badge.textContent = 'checking...';
+            return;
+        }
+        if (!v1CollectionsLoaded) {
+            badge.textContent = 'checking after auth';
+            return;
+        }
+        const n = v1CollectionsMeta.length;
+        badge.textContent = `${n} folder${n !== 1 ? 's' : ''} available`;
+    }
+
+    async function fetchV1CollectionsMetadata({ force = false, quiet = false } = {}) {
+        if (v1CollectionsLoading && v1CollectionsPromise) return v1CollectionsPromise;
+        if (v1CollectionsLoaded && !force) return v1CollectionsMeta;
+
+        v1CollectionsLoading = true;
+        updateV1CollectionsBadge();
+        v1CollectionsPromise = (async () => {
+            const all = [];
+            let afterId = null;
+            let hasMore = true;
+            while (hasMore && !stopRequested) {
+                const qs = `limit=${V1_COLLECTIONS_LIMIT}${afterId ? `&after=${encodeURIComponent(afterId)}` : ''}`;
+                const r = await fetchWithRetry(
+                    `${location.origin}/backend/collections?${qs}`,
+                    { credentials: 'include', headers: buildHeaders() },
+                    quiet ? 1 : 3
+                );
+                if (!r) {
+                    if (!quiet) log('V1 folders: could not fetch collection list');
+                    break;
+                }
+                let data;
+                try { data = await r.json(); }
+                catch(e) {
+                    if (!quiet) log('V1 folders: collection list JSON parse error');
+                    break;
+                }
+                const page = Array.isArray(data?.data) ? data.data.filter(isBackupV1Collection) : [];
+                all.push(...page);
+                hasMore = data?.has_more === true;
+                afterId = data?.last_id ?? null;
+                if (hasMore && !afterId) break;
+                if (hasMore) await sleep(120);
+            }
+            v1CollectionsMeta = all;
+            v1CollectionsLoaded = true;
+            if (!quiet) log(`V1 folders: ${all.length} folder${all.length !== 1 ? 's' : ''} found`);
+            return v1CollectionsMeta;
+        })();
+        try {
+            return await v1CollectionsPromise;
+        } finally {
+            v1CollectionsLoading = false;
+            v1CollectionsPromise = null;
+            updateV1CollectionsBadge();
+        }
+    }
+
+    function prefetchV1CollectionsMetadata() {
+        const now = Date.now();
+        if (v1CollectionsLoaded || v1CollectionsLoading) return;
+        if (now - v1CollectionsLastPrefetch < 15000) return;
+        if (!oaiDeviceId && !CFG.BEARER_TOKEN) {
+            updateV1CollectionsBadge();
+            return;
+        }
+        v1CollectionsLastPrefetch = now;
+        fetchV1CollectionsMetadata({ quiet: true }).catch(() => updateV1CollectionsBadge());
+    }
+
     async function fetchAllV1() {
         log('── V1 Images / Videos ──');
         let afterId = null, hasMore = true, page = 0;
@@ -1418,8 +1579,43 @@
         setSrcStatus('v1_liked', stopRequested ? 'skipped' : 'done');
     }
 
+    async function fetchAllV1Collections() {
+        log('── V1 Folders ──');
+        const collections = await fetchV1CollectionsMetadata({ force: true });
+        if (!collections.length) {
+            log('V1 folders: no folders found');
+            setSrcStatus('v1_collections', stopRequested ? 'skipped' : 'done');
+            return;
+        }
+
+        for (const coll of collections) {
+            if (stopRequested) break;
+            const title = coll.title || 'Untitled folder';
+            log(`Folder "${title}"`);
+            let afterId = null, hasMore = true, page = 0;
+            while (hasMore && !stopRequested) {
+                page++;
+                const qs = `limit=${V1_COLLECTION_GENERATIONS_LIMIT}${afterId ? `&after=${encodeURIComponent(afterId)}` : ''}`;
+                const url = `${location.origin}/backend/collections/${encodeURIComponent(coll.id)}/generations?${qs}`;
+                const r = await fetchWithRetry(url, { credentials: 'include', headers: buildHeaders() });
+                if (!r) { setSrcStatus('v1_collections', 'error'); return; }
+                let data;
+                try { data = await r.json(); }
+                catch(e) { log(`V1 folder "${title}": JSON parse error`); setSrcStatus('v1_collections', 'error'); return; }
+                const result = ingestV1CollectionPage(data, coll, `/collections/${coll.id}`);
+                hasMore = result.hasMore;
+                afterId = result.lastId;
+                log(`Folder "${title}" p${page}: ${collected.size} items${hasMore ? '...' : ' ✓'}`);
+                if (hasMore && !afterId) { log(`⚠ V1 folder "${title}": has_more but no last_id - stopping folder`); break; }
+                if (hasMore) await sleep(120);
+            }
+            await sleep(120);
+        }
+        setSrcStatus('v1_collections', stopRequested ? 'skipped' : 'done');
+    }
+
     async function fetchAllV2(baseEndpoint, sourceId, contextTag = null, opts = {}) {
-        const { quiet = false, silent = false, capturedPath = null } = opts;
+        const { quiet = false, silent = false, capturedPath = null, pageDelayMs = 60 } = opts;
         if (!silent) log(`── ${sourceId}${contextTag ? ` · ${contextTag}` : ''} ──`);
         const base = `${location.origin}${baseEndpoint}`;
         let cursor = null, hasMore = true, page = 0;
@@ -1436,7 +1632,7 @@
             hasMore = result.nextCursor != null;
             cursor  = result.nextCursor;
             if (!quiet) log(`${sourceId} p${page}: ${collected.size} items${hasMore ? '…' : ' ✓'}`);
-            if (hasMore) await sleep(60);
+            if (hasMore) await sleep(pageDelayMs);
         }
         if (!silent) setSrcStatus(sourceId, stopRequested ? 'skipped' : 'done');
     }
@@ -1564,6 +1760,7 @@
         const FETCH_MAP = {
             v1_library: fetchAllV1,
             v1_liked:   fetchAllV1Liked,
+            v1_collections: fetchAllV1Collections,
             v2_profile:      () => fetchAllV2('/backend/project_y/profile_feed/me?limit=8&cut=nf2', 'v2_profile'),
             v2_drafts:       () => fetchAllV2('/backend/project_y/profile/drafts/v2?limit=15', 'v2_drafts'),
             v2_liked:        fetchAllV2Liked,
@@ -1833,18 +2030,44 @@
         }];
     }
 
+    function clearDiscoverWarmRoute(routePath) {
+        const route = (routePath || '/explore').split('?')[0] || '/explore';
+        const existing = discoverWarmFrames.get(route);
+        if (existing?.iframe?.isConnected) {
+            try { existing.iframe.remove(); } catch(e) {}
+        }
+        discoverWarmFrames.delete(route);
+    }
+
+    async function waitForDiscoverSentinel(timeoutMs = 5000) {
+        const started = Date.now();
+        while (!storedV2Headers['openai-sentinel-token'] && Date.now() - started < timeoutMs) {
+            await sleep(200);
+        }
+        return !!storedV2Headers['openai-sentinel-token'];
+    }
+
     async function discoverFetchBackend(url, opts = {}, endpoint = null) {
         if (!endpoint?.usePageFetch) return _fetch(url, opts);
         const key = normaliseFetchUrl(url);
         const routePath = endpoint.capturedPath || topPathForDiscover();
         const frameWin = await warmDiscoverFeedRoute(routePath);
+        await waitForDiscoverSentinel();
         const fetchHost = frameWin?.fetch ? frameWin : ENV.win;
         const fetchFn = fetchHost.fetch.bind(fetchHost);
+        const nextOpts = { ...opts };
+        if (storedV2Headers['openai-sentinel-token']) {
+            nextOpts.headers = {
+                ...(opts.headers || {}),
+                'openai-sentinel-token': storedV2Headers['openai-sentinel-token'],
+            };
+        }
         discoverOwnFetchUrls.add(key);
         try {
-            // For Sora 1 feed endpoints, the app's own fetch wrapper can attach
-            // a fresh openai-sentinel-token. Raw _fetch can only reuse stale tokens.
-            return await fetchFn(url, opts);
+            // V1 Explore feed requests need the `sora_list_feed` sentinel token.
+            // Warming the hidden Explore route lets Sora generate it; then we reuse
+            // the captured token for our own paginated `/backend/feed/*` calls.
+            return await fetchFn(url, nextOpts);
         } finally {
             discoverOwnFetchUrls.delete(key);
         }
@@ -1912,17 +2135,34 @@
                 discoverStats.current = `${endpoint.label} page ${page + 1}`;
                 discoverStats.lastEvent = cursor ? 'fetching next feed page' : 'fetching feed';
                 updateMirrorRunningStats();
-                let r;
-                try {
-                    r = await discoverFetchBackend(url, {
-                        credentials: 'include',
-                        headers: buildHeaders(),
-                        referrer: `${location.origin}${referrerPath}`,
-                    }, endpoint);
-                } catch(e) {
-                    log(`Discover probe ${endpoint.label}: network error ${e.message}`);
-                    break;
+                let r = null;
+                for (let attempt = 1; attempt <= 3 && !stopRequested && discoverRunning && token === discoverRunToken; attempt++) {
+                    try {
+                        r = await discoverFetchBackend(url, {
+                            credentials: 'include',
+                            headers: buildHeaders(),
+                            referrer: `${location.origin}${referrerPath}`,
+                        }, endpoint);
+                    } catch(e) {
+                        log(`Discover probe ${endpoint.label}: network error ${e.message}`);
+                        r = null;
+                    }
+                    if (r?.ok) break;
+                    const status = r?.status ?? 0;
+                    const retryable = status === 0 || status === 400 || status === 429 || status >= 500;
+                    if (!retryable || attempt >= 3) break;
+                    if (status === 400 && endpoint.usePageFetch) {
+                        delete storedV2Headers['openai-sentinel-token'];
+                        clearDiscoverWarmRoute(referrerPath);
+                    }
+                    const retryAfter = Number(r?.headers?.get?.('retry-after'));
+                    const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+                        ? retryAfter * 1000
+                        : DISCOVER_REQUEST_DELAY_MS * (attempt + 1);
+                    log(`Discover probe ${endpoint.label}: retrying HTTP ${status || 'network'} in ${Math.round(waitMs / 1000)}s`);
+                    await sleep(waitMs);
                 }
+                if (!r) break;
                 if (!r.ok) {
                     log(`Discover probe ${endpoint.label}: HTTP ${r.status}`);
                     if (r.status === 400 && !storedV2Headers['openai-sentinel-token']) {
@@ -1952,9 +2192,10 @@
                     log(`Discover probe ${endpoint.label}: has_more=true but no ${cursorParam} cursor found`);
                 }
                 if (!cursor) break;
-                await sleep(80);
+                await sleep(DISCOVER_REQUEST_DELAY_MS);
             }
             if (anyUseful) break;
+            await sleep(DISCOVER_REQUEST_DELAY_MS);
         }
         return anyUseful;
     }
@@ -2035,7 +2276,7 @@
         updateMirrorRunningStats();
         await fetchAllV2(
             `/backend/project_y/profile_feed/${encodeURIComponent(c.userId)}?limit=8&cut=nf2`,
-            'v2_creator', username, { quiet: true, silent: true, capturedPath: `/profile/${username}` }
+            'v2_creator', username, { quiet: true, silent: true, capturedPath: `/profile/${username}`, pageDelayMs: DISCOVER_REQUEST_DELAY_MS }
         );
         if (browseFetchFilters.includeChars) {
             await fetchCharactersOfUser(c.userId, async (ch) => {
@@ -2047,13 +2288,14 @@
                 updateMirrorRunningStats();
                 await fetchAllV2(
                     `/backend/project_y/profile_feed/${encodeURIComponent(chId)}?limit=8&cut=nf2`,
-                    'v2_creator', username, { quiet: true, silent: true, capturedPath: `/profile/${username}/characters/${chUsername}` }
+                    'v2_creator', username, { quiet: true, silent: true, capturedPath: `/profile/${username}/characters/${chUsername}`, pageDelayMs: DISCOVER_REQUEST_DELAY_MS }
                 );
                 await fetchAllV2(
                     `/backend/project_y/profile_feed/${encodeURIComponent(chId)}?limit=8&cut=appearances`,
-                    'v2_creator', username, { quiet: true, silent: true, capturedPath: `/profile/${username}/characters/${chUsername}/appearances` }
+                    'v2_creator', username, { quiet: true, silent: true, capturedPath: `/profile/${username}/characters/${chUsername}/appearances`, pageDelayMs: DISCOVER_REQUEST_DELAY_MS }
                 );
                 log(`Discover: ${username} -> character ${chUsername}`);
+                await sleep(DISCOVER_CREATOR_DELAY_MS);
             });
         }
         const st = discoverCreatorStats.get(sanitiseSegment(username)) || discoverCreatorStats.get(username);
@@ -2062,7 +2304,7 @@
     }
 
     async function discoverDrainCreatorQueue(token) {
-        const limit = Math.max(1, Math.min(4, (SPEED_PRESETS[speedIdx] ?? SPEED_PRESETS[1]).workers || 4));
+        const limit = Math.max(1, Math.min(4, getDiscoverSpeedPreset().workers || 2));
         const workers = Array.from({ length: limit }, async () => {
             while (discoverRunning && !stopRequested && token === discoverRunToken) {
                 const creator = discoverCreatorQueue.shift();
@@ -2080,7 +2322,7 @@
                     log(`Discover: creator failed - ${e.message}`);
                 }
                 updateMirrorRunningStats();
-                await sleep(120);
+                await sleep(DISCOVER_CREATOR_DELAY_MS);
             }
         });
         await Promise.all(workers);
@@ -2177,6 +2419,10 @@
     function getSubfolderName(item) {
         if (item.mode === 'v1') {
             if (item.source === 'v1_liked') return SUBFOLDERS.v1_liked;
+            if (item.source === 'v1_collections') {
+                const folder = sanitiseSegment(item.collectionTitle || item.collectionId || 'untitled_folder');
+                return `${SUBFOLDERS.v1_collections}/${folder}`;
+            }
             return item.isVideo ? SUBFOLDERS.v1_videos : SUBFOLDERS.v1_library;
         }
         if (item.source === 'v2_my_characters') {
@@ -2242,6 +2488,7 @@
         }
         if (item.isVideo && item.mode === 'v1') lines.push(`Type           : V1 Video`);
         if (item.author)                        lines.push(`Author         : ${item.author}`);
+        if (item.collectionTitle)               lines.push(`Folder         : ${item.collectionTitle}`);
         if (item.width && item.height) {
             lines.push(`Resolution     : ${item.width} × ${item.height} px`);
             lines.push(`Aspect ratio   : ${item.ratio || '?'}`);
@@ -3117,7 +3364,6 @@
             await stopDiscoverMode();
             return;
         }
-        if (speedIdx === 0) setSpeedIdx(1);
         resetDiscoverState();
         const ok = await enableBrowseFetch('discover');
         if (!ok) { updateScanButton(); return; }
@@ -4080,6 +4326,7 @@
         if (oaiDeviceId) {
             el.classList.add('authed'); el.title = 'Auth captured ✓';
             if (!geoCheckInitDone) { geoCheckInitDone = true; preflightV2Check(); }
+            prefetchV1CollectionsMetadata();
         } else {
             el.classList.remove('authed'); el.title = 'Waiting — keep this Sora tab open';
         }
@@ -5184,6 +5431,12 @@ select.sdl-bf-input { min-height:28px; resize:none; }
           <span class="sdl-src-name">Likes</span>
           <span class="sdl-src-sub">Creator content you liked</span>
         </label>
+        <label class="sdl-src-row" id="sdl-src-row-v1_collections">
+          <input type="checkbox" id="sdl-src-cb-v1_collections" checked>
+          <span class="sdl-src-icon" style="font-size: 14px;">▣</span>
+          <span class="sdl-src-name">Folders</span>
+          <span class="sdl-src-sub" id="sdl-v1-folders-count">checking after auth</span>
+        </label>
       </div>
 
       <!-- Sora 2 -->
@@ -5744,6 +5997,7 @@ select.sdl-bf-input { min-height:28px; resize:none; }
       📷 V1 Images  → <code style="color:rgba(255,255,255,0.38)">sora_v1_images</code><br>
       🎬 V1 Videos  → <code style="color:rgba(255,255,255,0.38)">sora_v1_videos</code><br>
       ♡  V1 Liked   → <code style="color:rgba(255,255,255,0.38)">sora_v1_liked</code><br>
+      ▣  V1 Folders → <code style="color:rgba(255,255,255,0.38)">sora_v1_folders/&lt;folder&gt;</code><br>
       🎬 V2 Profile       → <code style="color:rgba(255,255,255,0.38)">sora_v2_profile</code><br>
       📋 V2 Drafts        → <code style="color:rgba(255,255,255,0.38)">sora_v2_drafts</code><br>
       ♡  V2 Liked         → <code style="color:rgba(255,255,255,0.38)">sora_v2_liked</code><br>
@@ -5857,7 +6111,6 @@ select.sdl-bf-input { min-height:28px; resize:none; }
                 setStatus('Creator Backup requires Sora 2 access');
                 return;
             }
-            if (mode === 'discover' && speedIdx === 0) setSpeedIdx(1);
             activeStartMode = mode;
             document.querySelectorAll('.sdl-mode-card').forEach(card => {
                 card.classList.toggle('active', card.dataset.mode === mode);
@@ -6293,7 +6546,9 @@ select.sdl-bf-input { min-height:28px; resize:none; }
         updateShutdownBadge();
         updateScanButton();
         updateWatermarkEstimateBadge();
+        updateV1CollectionsBadge();
         setState('init');
+        setTimeout(prefetchV1CollectionsMetadata, 1800);
         setTimeout(prewarmDiscoverSentinelRoutes, 2200);
 
         // Geo-check: first attempt after page settles, then poll every 10s if blocked or initializing
@@ -6301,6 +6556,9 @@ select.sdl-bf-input { min-height:28px; resize:none; }
         setInterval(() => {
             if (uiState === 'init' || !isV2Supported) {
                 preflightV2Check();
+            }
+            if (uiState === 'init' && !v1CollectionsLoaded) {
+                prefetchV1CollectionsMetadata();
             }
         }, 10000);
     }
