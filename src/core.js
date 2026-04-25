@@ -1,5 +1,5 @@
 /*! 
-  SoraVault 2.7
+  SoraVault 
 
   MIT License
   Copyright © 2026 Sebastian Haas (charyou)
@@ -64,8 +64,8 @@
     // =====================================================================
     // CONFIG & RELEASE INFO
     // =====================================================================
-    const VERSION      = '2.7.2';
-    const RELEASE_DATE = '2026-04-24';
+    const VERSION      = '3.0.0';
+    const RELEASE_DATE = '2026-04-25';
     const GITHUB_REPO  = 'charyou/SoraVault';
     const SORA_SHUTDOWN = new Date('2026-04-26T00:00:00Z');
 
@@ -5122,7 +5122,7 @@ select.sdl-bf-input { min-height:28px; resize:none; }
        src="${ENV.LOGO_URL}"
        alt="SoraVault" referrerpolicy="no-referrer">
   <span id="sdl-logo-fb">🔐</span>
-  <span id="sdl-title">SoraVault 2.7   
+  <span id="sdl-title">SoraVault 3  
   <span style="font-size: 8px; display: inline-block; transform: scale(0.8); transform-origin: left; opacity: 0.8;">
 
   </span>
@@ -5319,7 +5319,7 @@ select.sdl-bf-input { min-height:28px; resize:none; }
         <div class="sdl-discover-setup-card">
           <div class="sdl-discover-setup-title">Discovery Scope</div>
         <div class="sdl-bf-row">
-          <label class="sdl-bf-lbl">Sora version
+          <label class="sdl-bf-lbl">You can only download the Sora version you're currently on.
             <select id="sdl-discover-version" class="sdl-bf-input">
               <option value="v1">Sora 1</option>
               <option value="v2" selected>Sora 2</option>
@@ -5481,7 +5481,7 @@ select.sdl-bf-input { min-height:28px; resize:none; }
       </div>
     </div>
 
-    <details class="sdl-discover-advanced" id="sdl-discover-advanced" open>
+    <details class="sdl-discover-advanced" id="sdl-discover-advanced" closed>
       <summary>Advanced statistics</summary>
       <div class="sdl-discover-detail" id="sdl-discover-detail" style="display:none;"></div>
     </details>
