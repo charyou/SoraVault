@@ -110,6 +110,7 @@
     const DISCOVER_IDLE_SLEEP_MS           = 30000;
     const DISCOVER_REQUEST_DELAY_MS        = 1200;
     const DISCOVER_CREATOR_DELAY_MS        = 900;
+    const REMIX_PAGE_DELAY_MS              = 900;
     const V1_COLLECTIONS_LIMIT             = 100;
     const V1_COLLECTION_GENERATIONS_LIMIT  = 10;
 
@@ -140,6 +141,8 @@
         v2_cameo_drafts: 'Cameo drafts',
         v2_my_characters: 'Characters',
         v2_creator:      'Creators',
+        v2_remix_children: 'Remix children',
+        v2_remix_parents:  'Remix parents',
     };
 
     // Per-category subfolder names — keyed by source ID
@@ -155,6 +158,9 @@
         v2_cameo_drafts: 'sora_v2_cameo_drafts',
         v2_my_characters: 'sora_v2_characters',
         v2_creator:      'sora_v2_creators',
+        v2_remix_children: 'sora_v2_remixes/downstream',
+        v2_remix_parents:  'sora_v2_remixes/parents',
+        v2_remix_chains:   'sora_v2_remixes/chains',
     };
 
     const SPEED_PRESETS = [
@@ -279,6 +285,12 @@
     let creatorFetchIncludeChars = true;
     let creatorFetchPersist      = true;
     const creators = [];  // Array<{ username, userId, state: 'checking'|'valid'|'invalid'|'error', postCount, characterCount, error? }>
+
+    // Remix enrichment state. Remix media is related to the user's videos, but stored
+    // under its own root so it does not become indistinguishable from account backups.
+    let remixChainMode           = 'off'; // off | metadata | media
+    const remixChainRecords      = [];
+    const remixChainRecordKeys   = new Set();
 
     // Source enable/disable state — all enabled by default except preview sources
     const enabledSources = new Set(SCAN_SOURCES.map(s => s.id));
@@ -749,6 +761,274 @@
         if (added > 0) { log(`+${added} → ${collected.size} total`); refreshScanCount(); }
         const nextCursor = data.cursor ?? null;
         return { hasMore: nextCursor != null, nextCursor };
+    }
+
+    function firstNonEmpty(...values) {
+        for (const value of values) {
+            if (typeof value === 'string' && value.trim()) return value.trim();
+        }
+        return null;
+    }
+
+    function extractV2PostWrapper(value) {
+        if (!value || typeof value !== 'object') return null;
+        if (value.data && typeof value.data === 'object') return extractV2PostWrapper(value.data);
+        if (value.item && typeof value.item === 'object') return extractV2PostWrapper(value.item);
+        if (value.post?.post && typeof value.post.post === 'object') return value.post;
+        if (value.post && typeof value.post === 'object') return value;
+        if (value.id && Array.isArray(value.attachments)) {
+            return { post: value, profile: value.profile ?? null };
+        }
+        return null;
+    }
+
+    function getPostIdFromWrapper(value) {
+        const wrapper = extractV2PostWrapper(value);
+        return wrapper?.post?.id ?? (value?.id && Array.isArray(value?.attachments) ? value.id : null);
+    }
+
+    function buildV2EntryFromPostWrapper(rawItem, sourceId, contextTag = null, extra = {}) {
+        const wrapper = extractV2PostWrapper(rawItem);
+        const post = wrapper?.post;
+        if (!post) return null;
+        const postId = post.id ?? '';
+        if (!postId) return null;
+        const date = post.posted_at
+            ? new Date(post.posted_at * 1000).toISOString().slice(0, 10)
+            : (post.updated_at ? new Date(post.updated_at * 1000).toISOString().slice(0, 10) : '');
+        const att = (post.attachments ?? [])[0] ?? {};
+        const encSrc = att.encodings?.source;
+        const encSrcUrl = encSrc && typeof encSrc === 'object' ? (encSrc.url ?? null)
+                        : (typeof encSrc === 'string' ? encSrc : null);
+        const downloadUrl = firstNonEmpty(
+            att.encodings?.source?.path,
+            att.downloadable_url,
+            att.download_urls?.watermark,
+            encSrcUrl,
+            att.url
+        );
+        const gw = att.width ?? null, gh = att.height ?? null;
+        let ratio = null;
+        if (gw && gh) { const g = gcd(gw, gh); ratio = `${gw/g}:${gh/g}`; }
+        return {
+            mode: 'v2', source: sourceId,
+            genId: att.id ?? att.generation_id ?? postId,
+            taskId: att.task_id ?? null,
+            postId,
+            date,
+            prompt: post.text ?? post.caption ?? '',
+            downloadUrl,
+            previewUrl: att.url ?? null,
+            thumbUrl: post.preview_image_url ?? null,
+            width: gw, height: gh, ratio,
+            duration: att.duration_s ?? null, model: null,
+            isLiked: post.user_liked === true,
+            likeCount: readLikeCount(post, rawItem),
+            author: contextTag ?? wrapper.profile?.username ?? null,
+            creatorUsername: contextTag ?? wrapper.profile?.username ?? null,
+            _raw: { post, profile: wrapper.profile ?? null },
+            ...extra,
+        };
+    }
+
+    function addRemixChainRecord(record) {
+        const key = [
+            record.direction || '',
+            record.source || '',
+            record.sourcePostId || '',
+            record.childPostId || '',
+            record.parentPostId || '',
+            record.rootPostId || '',
+        ].join(':');
+        if (remixChainRecordKeys.has(key)) return false;
+        remixChainRecordKeys.add(key);
+        remixChainRecords.push({
+            capturedAt: new Date().toISOString(),
+            ...record,
+        });
+        return true;
+    }
+
+    function getEntryRawPost(item) {
+        return item?._raw?.post ?? item?._raw ?? null;
+    }
+
+    function hasDownstreamRemixCandidates(item) {
+        const post = getEntryRawPost(item);
+        if (!item?.postId || !post || typeof post !== 'object') return false;
+        return Number(post.remix_count ?? 0) > 0
+            || Number(post.num_direct_children ?? 0) > 0
+            || post.has_children === true;
+    }
+
+    function getParentRemixCandidate(item) {
+        const post = getEntryRawPost(item);
+        if (!post || typeof post !== 'object') return null;
+        const cfg = post.creation_config ?? {};
+        const embedded = post.parent_post ?? cfg.remix_target_post ?? null;
+        const rootPostId = post.root_post_id ?? null;
+        const parentId = getPostIdFromWrapper(embedded)
+            ?? post.parent_post_id
+            ?? cfg.remix_target_id
+            ?? (rootPostId && rootPostId !== post.id ? rootPostId : null)
+            ?? null;
+        const parentPath = Array.isArray(post.parent_path) ? post.parent_path : [];
+        const hasParentSignal = !!embedded || !!parentId || parentPath.length > 0;
+        if (!hasParentSignal) return null;
+        return {
+            embedded,
+            parentId,
+            rootPostId,
+            parentPath,
+            childPostId: item.postId ?? post.id ?? item.genId ?? null,
+        };
+    }
+
+    async function fetchPostWrapperById(postId) {
+        if (!postId) return null;
+        const encoded = encodeURIComponent(postId);
+        try {
+            const r = await fetchWithRetry(
+                `${location.origin}/backend/project_y/post/${encoded}`,
+                { credentials: 'include', headers: buildHeaders() },
+                2
+            );
+            if (r) {
+                const data = await r.json();
+                const wrapper = extractV2PostWrapper(data);
+                if (wrapper) return wrapper;
+            }
+        } catch(e) {}
+        try {
+            const r = await fetchWithRetry(
+                `${location.origin}/backend/project_y/post/${encoded}/tree?limit=20&max_depth=1`,
+                { credentials: 'include', headers: buildHeaders() },
+                2
+            );
+            if (r) {
+                const data = await r.json();
+                const wrapper = extractV2PostWrapper(data);
+                if (wrapper) return wrapper;
+            }
+        } catch(e) {}
+        return null;
+    }
+
+    async function fetchRemixChildrenForItem(sourceItem) {
+        const sourcePostId = sourceItem?.postId;
+        if (!sourcePostId) return 0;
+        let cursor = null, found = 0;
+        const base = `${location.origin}/backend/project_y/post/${encodeURIComponent(sourcePostId)}/remix_feed?limit=20`;
+        while (!stopRequested) {
+            const url = cursor ? `${base}&cursor=${encodeURIComponent(cursor)}` : base;
+            const r = await fetchWithRetry(url, { credentials: 'include', headers: buildHeaders() }, 2);
+            if (!r) break;
+            let data;
+            try { data = await r.json(); }
+            catch(e) { log(`Remixes: JSON parse error for ${sourcePostId}`); break; }
+            const items = Array.isArray(data?.items) ? data.items : (Array.isArray(data?.data) ? data.data : []);
+            for (const raw of items) {
+                const wrapper = extractV2PostWrapper(raw);
+                const childPost = wrapper?.post;
+                const childPostId = childPost?.id ?? null;
+                if (!childPostId) continue;
+                const parentPostId = childPost.parent_post_id ?? sourcePostId;
+                const rootPostId = childPost.root_post_id ?? sourceItem.remixRootPostId ?? sourcePostId;
+                const parentPath = Array.isArray(childPost.parent_path) ? childPost.parent_path : [];
+                addRemixChainRecord({
+                    direction: 'child',
+                    source: 'v2_remix_children',
+                    sourcePostId,
+                    childPostId,
+                    parentPostId,
+                    rootPostId,
+                    parentPath,
+                    creatorUsername: wrapper.profile?.username ?? null,
+                    prompt: childPost.text ?? childPost.caption ?? '',
+                    raw: { post: childPost, profile: wrapper.profile ?? null },
+                });
+                if (remixChainMode === 'media') {
+                    const key = `v2_remix_children:${sourcePostId}:${childPostId}`;
+                    if (!collected.has(key)) {
+                        const entry = buildV2EntryFromPostWrapper(raw, 'v2_remix_children', wrapper.profile?.username ?? null, {
+                            remixDirection: 'child',
+                            remixSourcePostId: sourcePostId,
+                            remixParentPostId: parentPostId,
+                            remixRootPostId: rootPostId,
+                            remixParentPath: parentPath,
+                        });
+                        if (entry) collected.set(key, entry);
+                    }
+                }
+                found++;
+            }
+            cursor = data?.cursor ?? null;
+            if (!cursor) break;
+            await sleep(REMIX_PAGE_DELAY_MS);
+        }
+        return found;
+    }
+
+    async function captureRemixParentForItem(item) {
+        const candidate = getParentRemixCandidate(item);
+        if (!candidate) return 0;
+        const embeddedWrapper = extractV2PostWrapper(candidate.embedded);
+        const parentWrapper = embeddedWrapper ?? await fetchPostWrapperById(candidate.parentId);
+        const parentPostId = getPostIdFromWrapper(parentWrapper) ?? candidate.parentId ?? null;
+        if (!parentPostId && !candidate.rootPostId) return 0;
+        const parentPost = parentWrapper?.post ?? null;
+        addRemixChainRecord({
+            direction: 'parent',
+            source: 'v2_remix_parents',
+            childPostId: candidate.childPostId,
+            parentPostId,
+            rootPostId: candidate.rootPostId ?? parentPost?.root_post_id ?? parentPostId,
+            parentPath: candidate.parentPath,
+            creatorUsername: parentWrapper?.profile?.username ?? null,
+            prompt: parentPost?.text ?? parentPost?.caption ?? '',
+            raw: parentWrapper ? { post: parentPost, profile: parentWrapper.profile ?? null } : null,
+        });
+        if (remixChainMode === 'media' && parentWrapper && parentPostId) {
+            const key = `v2_remix_parents:${parentPostId}`;
+            if (!collected.has(key)) {
+                const entry = buildV2EntryFromPostWrapper(parentWrapper, 'v2_remix_parents', parentWrapper.profile?.username ?? null, {
+                    remixDirection: 'parent',
+                    remixChildPostId: candidate.childPostId,
+                    remixRootPostId: candidate.rootPostId ?? parentWrapper.post?.root_post_id ?? parentPostId,
+                    remixParentPath: candidate.parentPath,
+                });
+                if (entry) collected.set(key, entry);
+            }
+        }
+        return 1;
+    }
+
+    async function enrichRemixChains() {
+        if (remixChainMode === 'off' || !isV2Supported || stopRequested) return;
+        const baseItems = [...collected.values()].filter(item =>
+            item.mode === 'v2' && !String(item.source || '').startsWith('v2_remix_')
+        );
+        if (!baseItems.length) return;
+
+        log(`Remix chains: scanning ${baseItems.length} Sora 2 items (${remixChainMode === 'media' ? 'metadata + media' : 'metadata only'})`);
+        let downstream = 0, parents = 0;
+        for (const item of baseItems) {
+            if (stopRequested) break;
+            if (hasDownstreamRemixCandidates(item)) {
+                downstream += await fetchRemixChildrenForItem(item);
+                await sleep(REMIX_PAGE_DELAY_MS);
+            }
+            if (getParentRemixCandidate(item)) {
+                parents += await captureRemixParentForItem(item);
+                await sleep(REMIX_PAGE_DELAY_MS);
+            }
+        }
+        if (remixChainRecords.length > 0) {
+            log(`Remix chains: ${remixChainRecords.length} relationships captured (${downstream} downstream, ${parents} parent links)`);
+            refreshScanCount();
+        } else {
+            log('Remix chains: no remix relationships found');
+        }
     }
 
     function refreshScanCount() {
@@ -1429,6 +1709,11 @@
             badge.textContent = isV2Supported ? '✓ available' : '⚠ geo-blocked · Enable a VPN to US to access Sora 2';
             badge.className   = 'sdl-src-group-badge ' + (isV2Supported ? 'badge-ok' : 'badge-blocked');
         }
+        const remixSelect = document.getElementById('sdl-remix-mode');
+        if (remixSelect) {
+            remixSelect.disabled = !isV2Supported;
+            if (!isV2Supported) remixSelect.value = 'off';
+        }
         const creatorCard = document.getElementById('sdl-mode-creator');
         if (creatorCard) creatorCard.classList.toggle('v2-disabled', !isV2Supported);
         if (!isV2Supported && activeStartMode === 'creator') {
@@ -1782,6 +2067,10 @@
             }
             setSrcStatus(src.id, 'active');
             await FETCH_MAP[src.id]();
+        }
+
+        if (activeStartMode === 'regular') {
+            await enrichRemixChains();
         }
 
     }
@@ -2430,6 +2719,14 @@
             }
             return item.isVideo ? SUBFOLDERS.v1_videos : SUBFOLDERS.v1_library;
         }
+        if (item.source === 'v2_remix_children') {
+            const sourcePost = sanitiseSegment(item.remixSourcePostId || item.remixParentPostId || item.remixRootPostId || 'unknown');
+            return `${SUBFOLDERS.v2_remix_children}/${sourcePost || 'unknown'}`;
+        }
+        if (item.source === 'v2_remix_parents') {
+            const creator = sanitiseSegment(item.author || item.creatorUsername || 'unknown');
+            return `${SUBFOLDERS.v2_remix_parents}/${creator || 'unknown'}`;
+        }
         if (item.source === 'v2_my_characters') {
             const char = sanitiseSegment(item.author ?? 'unknown');
             return `${SUBFOLDERS.v2_my_characters}/${char}`;
@@ -2490,6 +2787,11 @@
         if (item.mode === 'v2') {
             if (item.postId)           lines.push(`Post ID        : ${item.postId}`);
             if (item.duration != null) lines.push(`Duration       : ${item.duration}s`);
+            if (item.remixDirection)   lines.push(`Remix         : ${item.remixDirection}`);
+            if (item.remixSourcePostId) lines.push(`Remix source  : ${item.remixSourcePostId}`);
+            if (item.remixParentPostId) lines.push(`Remix parent  : ${item.remixParentPostId}`);
+            if (item.remixChildPostId)  lines.push(`Remix child   : ${item.remixChildPostId}`);
+            if (item.remixRootPostId)   lines.push(`Remix root    : ${item.remixRootPostId}`);
         }
         if (item.isVideo && item.mode === 'v1') lines.push(`Type           : V1 Video`);
         if (item.author)                        lines.push(`Author         : ${item.author}`);
@@ -2518,6 +2820,8 @@
             soravault_version: VERSION,
             exported_at:       new Date().toISOString(),
             scan_sources:      SCAN_SOURCES.filter(s => enabledSources.has(s.id)).map(s => s.id),
+            remix_chain_mode:  remixChainMode,
+            remix_chains:      remixChainRecords,
             total:             items.length,
             items,
         };
@@ -2553,6 +2857,67 @@
         }
         log(`JSON manifest saved: ${filename}`);
         if (!silent) showToast('JSON manifest saved ✓');
+    }
+
+    async function ensureDirPath(rootDir, folderPath) {
+        const segments = String(folderPath || '').split('/').filter(Boolean);
+        let dir = rootDir;
+        for (const seg of segments) {
+            dir = await dir.getDirectoryHandle(seg, { create: true });
+        }
+        return dir;
+    }
+
+    async function exportRemixChainManifest(silent = false) {
+        if (remixChainMode === 'off' || remixChainRecords.length === 0) return;
+        const payload = {
+            soravault_version: VERSION,
+            exported_at: new Date().toISOString(),
+            mode: remixChainMode,
+            storage: {
+                chains: `${SUBFOLDERS.v2_remix_chains}/remix_chains.json`,
+                downstream_media: `${SUBFOLDERS.v2_remix_children}/<source-post-id>/`,
+                parent_media: `${SUBFOLDERS.v2_remix_parents}/<creator-or-unknown>/`,
+            },
+            count: remixChainRecords.length,
+            chains: remixChainRecords,
+        };
+        const json = JSON.stringify(payload, null, 2);
+        const filename = 'remix_chains.json';
+        const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
+
+        if (baseDir) {
+            try {
+                const dir = await ensureDirPath(baseDir, SUBFOLDERS.v2_remix_chains);
+                const fh = await dir.getFileHandle(filename, { create: true });
+                const w = await fh.createWritable();
+                await w.write(blob); await w.close();
+                log(`Remix chain manifest saved: ${SUBFOLDERS.v2_remix_chains}/${filename}`);
+                if (!silent) showToast('Remix chain manifest saved');
+                return;
+            } catch(e) {
+                log(`Remix chain manifest write failed - ${e.message}`);
+            }
+        }
+
+        const url = URL.createObjectURL(blob);
+        const fallbackName = `${SUBFOLDERS.v2_remix_chains}/${filename}`;
+        if (ENV.isTM) {
+            GM_download({
+                url, name: fallbackName, saveAs: true,
+                onload:  () => URL.revokeObjectURL(url),
+                onerror: () => URL.revokeObjectURL(url),
+            });
+        } else {
+            const a = document.createElement('a');
+            a.href = url; a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 3000);
+        }
+        log(`Remix chain manifest saved: ${fallbackName}`);
+        if (!silent) showToast('Remix chain manifest saved');
     }
 
     // =====================================================================
@@ -3425,6 +3790,9 @@
         isRunning = true; stopRequested = false;
         collected.clear(); completedCount = 0; failedCount = 0;
         cachedUserId = null;
+        remixChainRecords.length = 0;
+        remixChainRecordKeys.clear();
+        remixChainMode = document.getElementById('sdl-remix-mode')?.value ?? 'off';
         resetFilters();
 
         SCAN_SOURCES.forEach(s => setSrcStatus(s.id, enabledSources.has(s.id) ? 'pending' : 'idle'));
@@ -3657,10 +4025,11 @@
         const saveMedia = readConfigBool('SAVE_MEDIA', true);
         const saveTxt   = readConfigBool('DOWNLOAD_TXT', CFG.DOWNLOAD_TXT);
         const saveJSON  = readConfigBool('SAVE_JSON', false);
+        const saveRemixChains = remixChainMode !== 'off' && remixChainRecords.length > 0;
         skipEnabled     = readConfigBool('SKIP_EXISTING', true);
         watermarkRemovalEnabled = readConfigBool('WATERMARK_REMOVAL', false);
 
-        if (!saveMedia && !saveTxt && !saveJSON) {
+        if (!saveMedia && !saveTxt && !saveJSON && !saveRemixChains) {
             showToast('Enable at least one output format ↑');
             return;
         }
@@ -3670,7 +4039,7 @@
 
         baseDir = null;
 
-        if (saveMedia || saveTxt) {
+        if (saveMedia || saveTxt || saveRemixChains) {
             if (hasFS) {
                 try {
                     baseDir = await window.showDirectoryPicker({ mode: 'readwrite' });
@@ -3729,6 +4098,7 @@
         if (saveTxt)   logParts.push('+TXT');
         if (saveJSON)  logParts.push('+JSON');
         if (!saveMedia) logParts = [`Processing ${totalToDownload} ${word} (no media)`];
+        if (saveRemixChains) logParts.push('+REMIX CHAINS');
         log(logParts.join(' ') + '…');
 
         const totalEl = document.getElementById('sdl-dl-total');
@@ -3740,6 +4110,9 @@
             log('Saving JSON manifest first...');
             await exportJSON(true);
             showToast('JSON manifest saved first');
+        }
+        if (saveRemixChains) {
+            await exportRemixChainManifest(true);
         }
 
         const subDirCache = {};
@@ -3986,6 +4359,7 @@
             }
             if (saveTxt)  statItems.push(`<div class="sdl-done-stat sdl-done-stat-ok"><span class="sdl-done-stat-n">✓</span><span>prompts</span></div>`);
             if (saveJSON) statItems.push(`<div class="sdl-done-stat sdl-done-stat-ok"><span class="sdl-done-stat-n">✓</span><span>manifest</span></div>`);
+            if (remixChainRecords.length > 0) statItems.push(`<div class="sdl-done-stat sdl-done-stat-ok"><span class="sdl-done-stat-n">${remixChainRecords.length}</span><span>remix links</span></div>`);
             statsEl.innerHTML = statItems.join('<div class="sdl-done-stat-sep"></div>');
         }
         const filtersEl = document.getElementById('sdl-done-filters');
@@ -4074,9 +4448,11 @@
         if (!container) return;
         container.innerHTML = '';
 
-        // Only show sources that actually have items after the scan
-        const presentSources = SCAN_SOURCES.filter(src =>
-            [...collected.values()].some(i => i.source === src.id)
+        // Only show sources that actually have items after the scan, including
+        // enrichment-only sources that are not selectable scan inputs.
+        const presentSourceIds = [...new Set([...collected.values()].map(i => i.source).filter(Boolean))];
+        const presentSources = presentSourceIds.map(id =>
+            SCAN_SOURCES.find(src => src.id === id) || { id, label: SOURCE_LABELS[id] || id }
         );
 
         if (presentSources.length <= 1) {
@@ -4858,6 +5234,14 @@ select.sdl-bf-input { min-height:28px; resize:none; }
 .sdl-src-icon { grid-area:icon; font-size:14px; line-height:1; flex-shrink:0; }
 .sdl-src-name { grid-area:name; font-size:13px; font-weight:700; color:rgba(255,255,255,0.82); min-width:0; }
 .sdl-src-sub  { grid-area:sub; font-size:11px; color:rgba(255,255,255,0.34); white-space:normal; line-height:1.25; }
+.sdl-remix-setting {
+  grid-column:1 / -1; display:grid; grid-template-columns:1fr minmax(150px, 210px);
+  align-items:center; gap:10px; padding:10px 11px;
+  border:0.5px solid rgba(255,255,255,0.08); border-radius:8px;
+  background:rgba(255,255,255,0.018);
+}
+.sdl-remix-copy { display:flex; flex-direction:column; gap:3px; min-width:0; }
+.sdl-remix-setting .sdl-bf-input { width:100%; margin:0; }
 .sdl-geo-tag  {
   font-size:9px; padding:1.5px 6px; border-radius:20px;
   background:rgba(251,191,36,0.1); color:rgba(251,191,36,0.7);
@@ -5489,6 +5873,21 @@ select.sdl-bf-input { min-height:28px; resize:none; }
         </label>
       </div>
 
+      <div class="sdl-src-group">
+        <div class="sdl-src-group-hd">Remix chains</div>
+        <label class="sdl-remix-setting">
+          <span class="sdl-remix-copy">
+            <span class="sdl-src-name">Remix enrichment</span>
+            <span class="sdl-src-sub">Stores relationship data under sora_v2_remixes, separate from your backups.</span>
+          </span>
+          <select id="sdl-remix-mode" class="sdl-bf-input">
+            <option value="off" selected>Off</option>
+            <option value="metadata">Metadata only</option>
+            <option value="media">Metadata + related media</option>
+          </select>
+        </label>
+      </div>
+
     </div>
 
       <div id="sdl-src-note">Choose sources, scan once, then filter the backup.</div>
@@ -6111,6 +6510,13 @@ select.sdl-bf-input { min-height:28px; resize:none; }
         });
 
         // ── Settings / Expert drawers ──────────────────────────────────────
+        const remixModeSelect = document.getElementById('sdl-remix-mode');
+        if (remixModeSelect) {
+            remixModeSelect.addEventListener('change', () => {
+                remixChainMode = remixModeSelect.value || 'off';
+            });
+        }
+
         function setStartMode(mode) {
             if (mode === 'creator' && !isV2Supported) {
                 setStatus('Creator Backup requires Sora 2 access');
