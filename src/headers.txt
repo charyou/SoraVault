@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         SoraVault 2.6
+// @name         SoraVault
 // @namespace    https://github.com/charyou/SoraVault
-// @version      2.7.1
-// @description  Bulk backup Sora content — images, videos, drafts, liked. API-driven, page-independent.
+// @version      3.0.1
+// @description  Bulk backup Sora content — images, videos, folders, remixes, drafts, liked. API-driven, page-independent.
 // @author       Sebastian Haas (charyou)
 // @homepageURL  https://github.com/charyou/SoraVault
 // @supportURL   https://github.com/charyou/SoraVault/issues

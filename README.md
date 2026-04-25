@@ -3,9 +3,9 @@
 **Your Sora library is about to disappear. Vault it.**
 
 SoraVault is a free, local-first backup tool for OpenAI Sora. It can bulk save
-Sora 1 images and videos, Sora 2 videos, drafts, liked content, cameos,
-character content, creator libraries, prompts, and metadata without waiting for
-a platform export.
+Sora 1 images, videos, folders, Sora 2 videos, drafts, liked content, cameos,
+character content, remix chains, creator libraries, prompts, and metadata
+without waiting for a platform export.
 
 SoraVault 3.0 is the final release. Sora is shutting down, so this version is
 focused on one thing: helping you preserve as much as possible while Sora's live
@@ -21,6 +21,15 @@ APIs and media URLs still exist.
 ## New in 3.0
 
 <img src="assets/new-features.gif" alt="SoraVault redesigned mode picker with backup modes" width="720">
+
+SoraVault 3.0.1 adds two archive-focused Regular Backup sources on top of the
+3.0 release:
+
+- **Sora 1 Download Folders** - backs up Sora 1 collections into
+  `sora_v1_folders/<folder-title>/`, separate from the normal library and likes
+  folders.
+- **Sora 2 Remix Chains** - optionally backs up remix relationship metadata and
+  related remix media into `sora_v2_remixes/`, separate from your own videos.
 
 SoraVault 3.0 turns the app into four clear backup modes:
 
@@ -84,7 +93,7 @@ Sora pages, is open source, and keeps all work local in your browser.
 
 | Priority | Feature | What SoraVault does |
 |----------|---------|---------------------|
-| 1 | **Regular Backup** | Backs up your own Sora 1 library, Sora 1 likes, Sora 2 profile videos, drafts, liked videos, cameos, cameo drafts, and your own character content. |
+| 1 | **Regular Backup** | Backs up your own Sora 1 library, Sora 1 likes, Sora 1 folders, Sora 2 profile videos, drafts, liked videos, cameos, cameo drafts, remix chains, and your own character content. |
 | 2 | **Highest-quality files + prompts** | Downloads original media where available, often higher quality than manual UI downloads, and can save `.txt` prompt sidecars plus raw `.json` metadata. |
 | 3 | **Discover & Download** | Actively scans Sora 1 or Sora 2 feeds, discovers creators, filters what it finds, and saves matching content while Sora is still available. |
 | 4 | **Creator Backup** | Fetches public Sora 2 creators by username, optionally including their characters and appearances. |
@@ -109,11 +118,15 @@ Supported regular backup sources:
 
 - **Sora 1 Library** - your generated image/video library.
 - **Sora 1 Likes** - liked Sora 1 content, saved as a clean Sora-only archive.
+- **Sora 1 Folders** - your Sora 1 collections, saved under
+  `sora_v1_folders/<folder-title>/`.
 - **Sora 2 Videos** - your published profile posts.
 - **Sora 2 Drafts** - unpublished generated drafts.
 - **Sora 2 Liked** - liked Sora 2 videos from other creators.
 - **Sora 2 Cameos** - public posts featuring you.
 - **Sora 2 Cameo Drafts** - private draft posts featuring you.
+- **Sora 2 Remix Chains** - relationship metadata plus related remix media,
+  stored under `sora_v2_remixes/` so it stays separate from your own videos.
 - **Characters** - your own character posts, appearances, and drafts where
   available.
 
@@ -171,6 +184,7 @@ Sora 1 in Discover. If you are on Sora 2, choose Sora 2.
 - Optional raw `.json` manifest for audit/archive use.
 - Smart default filenames: `{genId}_{date}_{prompt}`.
 - Auto-sorted folders such as `sora_v2_profile`, `sora_v2_drafts`,
+  `sora_v1_folders/<folder-title>/`, `sora_v2_remixes/...`,
   `sora_v2_creators/{name}/`, `mirror_browse/...`, and `discover_download/...`.
 - Skip-existing support for safe re-runs.
 - Pause, resume, stop, progress, ETA, live worker activity, and speed retuning

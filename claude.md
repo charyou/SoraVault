@@ -47,6 +47,7 @@ Supported sources:
 - Sora 2 liked videos.
 - Sora 2 cameos.
 - Sora 2 cameo drafts.
+- Sora 2 remix chains, stored separately from the user's own videos.
 - User-owned character posts, appearances, and drafts where Sora exposes them.
 
 Important positioning:
@@ -68,6 +69,8 @@ Archive outputs:
 - Optional raw `.json` metadata manifest.
 - Smart filename template with `genId` by default.
 - Auto-sorted source folders.
+- Separate Sora 1 folder output: `sora_v1_folders/<folder-title>/`.
+- Separate remix output root: `sora_v2_remixes/`.
 - Skip-existing checks for safe re-runs.
 
 ### 3. Watermark Removal
@@ -228,6 +231,9 @@ Release workflow:
 - Do not split `src/core.js` casually; the build pipeline expects it.
 - `SCAN_SOURCES`, `SOURCE_LABELS`, and `SUBFOLDERS` are shared contracts.
 - Creator Backup items use `source: 'v2_creator'` and `creatorUsername`.
+- Remix Chains uses selectable source `v2_remix_chains`, media entries
+  `v2_remix_children` / `v2_remix_parents`, and chain metadata under
+  `sora_v2_remixes/chains/remix_chains.json`.
 - Mirror Mode and Discover & Download share `browseFetch*` downloader state.
 - Mirror Mode uses `mirror_browse/` and `mirror_manifest.json`.
 - Discover & Download uses `discover_download/` and `discover_manifest.json`.
@@ -236,12 +242,12 @@ Release workflow:
 
 ## Current Release State
 
-- Current release: `3.0.0`.
-- Release tag: `v3.0.0`.
-- 3.0.0 is the final release. It includes the complete UI rehaul, Creator
-  Backup, Mirror Mode, Discover & Download, character drafts/downloads, cameo
-  downloads, live worker retuning, Sora 1/Sora 2 discovery fixes, README refresh,
-  and final changelog release notes.
+- Current release: `3.0.1`.
+- Release tag: `v3.0.1`.
+- 3.0.1 builds on the final 3.0 release with Sora 1 folder downloads, Sora 2
+  Remix Chains, and additional Discover robustness fixes. The 3.0.1 changelog
+  intentionally includes the full original 3.0.0 release notes so the current
+  GitHub release contains the complete final-release context.
 
 ## Open Tasks
 
@@ -773,10 +779,12 @@ body includes: { flow: "sora_list_feed" }
   and runs Discover downloads/workers one speed tier below the selected UI
   preset.
 
-### Next Implementation: Remix Enrichment
+### Remix Enrichment Implementation
 
-Goal: preserve remix relationship data and optionally download related remix
-media into separate folders without mixing it into the main source folders.
+Goal: preserve remix relationship data and download related remix media into
+separate folders without mixing it into the main source folders. Remix chains are
+connected to the user's videos, but the related parent/child posts are not
+necessarily the user's own videos.
 
 Known endpoints and fields:
 
@@ -818,15 +826,16 @@ Proposed source IDs and folder structure:
   - Folder: `sora_v2_remixes/downstream/<root-or-parent-post-id>/`.
 - `v2_remix_parents`: source/original posts that the user's posts remixed.
   - Folder: `sora_v2_remixes/parents/<creator-or-unknown>/`.
-- `v2_remix_chains`: optional metadata-only chain manifests when media is not
-  downloaded.
+- `v2_remix_chains`: selectable Regular Backup source inside the Sora 2 section.
   - Folder/file: `sora_v2_remixes/chains/remix_chains.json`.
 
-Implementation plan:
+Implemented behavior:
 
-- Add a setting under Regular Backup for Remix enrichment:
-  - Off by default if scan speed is a concern.
-  - Options can start simple: `metadata only` vs `metadata + media`.
+- The Regular Backup start screen has an unchecked Sora 2 tile for Remix chains.
+- Toggling Remix chains on means metadata plus related media. There is no
+  metadata-only UI mode.
+- Remix chains is in `SCAN_SOURCES`, so it appears in scan progress with its own
+  active/done row and updates the scan counter as remix media entries are added.
 - During V2 profile/drafts/liked/cameo scans, detect candidate posts:
   - Downstream candidates: posts with `remix_count > 0` or `num_direct_children > 0`.
   - Parent candidates: posts/drafts whose raw metadata has `parent_post_id`,
@@ -845,6 +854,8 @@ Implementation plan:
   - Add metadata fields: `remixDirection: "parent"`, `remixChildPostId`,
     `remixRootPostId`, `remixParentPath`.
 - Write chain metadata even when media download is disabled:
+  - Current UI always enables media when Remix chains is selected, but the
+    manifest writer remains independent and can still write chain metadata.
   - `childPostId`
   - `parentPostId`
   - `rootPostId`
@@ -874,3 +885,33 @@ Risks / open checks:
   user-configurable remix limit.
 - Confirm whether parent media should always be downloaded or only metadata by
   default to avoid unexpectedly archiving many third-party originals.
+
+## 2026-04-25 Release 3.0.1 Notes
+
+Implemented and documented:
+
+- Version is `3.0.1` in `src/core.js`, `src/chrome/manifest.json`, and
+  `src/headers.txt`.
+- `CHANGELOG.md` now starts with `New in 3.0.1:` and highlights:
+  - Download Folders in Sora 1.
+  - Remix Chains.
+  - Discover Mode robustness fixes.
+  - The full original 3.0.0 release notes appended inside the 3.0.1 section for
+    GitHub release-note completeness.
+- `README.md` now mentions Sora 1 folders and Sora 2 remix chains in the top
+  product summary, New in 3.0 section, Regular Backup source list, feature
+  priorities, and archive folder examples.
+
+3.0.1 implementation summary:
+
+- Sora 1 folders use `v1_collections` and save to
+  `sora_v1_folders/<folder-title>/`.
+- Remix chains use selectable source `v2_remix_chains`, default off. When
+  enabled, they always back up metadata plus related media.
+- Remix chain metadata writes to `sora_v2_remixes/chains/remix_chains.json`.
+- Downstream remix media writes to
+  `sora_v2_remixes/downstream/<source-post-id>/`.
+- Parent/source remix media writes to
+  `sora_v2_remixes/parents/<creator-or-unknown>/`.
+- Remix child/parent media appears as separate filter categories only when those
+  sources are present in the scan result set.

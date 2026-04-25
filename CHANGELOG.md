@@ -7,6 +7,176 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ---
 
+## [3.0.1] - 2026-04-25
+
+New in 3.0.1:
+
+### Added
+
+- **Download Folders in Sora 1** - Regular Backup now includes Sora 1 folders
+  from the V1 collections API. SoraVault lists your folders, scans each folder's
+  generations, keeps folder metadata in manifests and sidecars, and saves files
+  under `sora_v1_folders/<folder-title>/` so folder backups do not mix with the
+  normal Sora 1 library or likes folders.
+- **Remix Chains** - Regular Backup now includes an optional Sora 2 `Remix
+  chains` source. When enabled, SoraVault captures remix relationship metadata
+  and related remix media. Relationship data is written to
+  `sora_v2_remixes/chains/remix_chains.json`; downstream remixes are stored under
+  `sora_v2_remixes/downstream/<source-post-id>/`; parent/source posts are stored
+  under `sora_v2_remixes/parents/<creator-or-unknown>/`. Remix content stays
+  separate from your own videos because it is connected to your work, but is not
+  your work.
+
+### Fixed
+
+- **Discover Mode robustness** - pushed several fixes to make Discover more
+  resilient: better Sora 1 feed probing, safer warmed-frame/sentinel handling,
+  clearer version selection, duplicate self-ingest suppression, and more cautious
+  request pacing while scanning feeds and creators.
+
+### Included from original 3.0.0 release
+
+SoraVault 3.0 is the final release. Sora is shutting down, and this version is
+meant to give you one last practical way to save as much of your Sora world as
+possible: your own library, drafts, likes, cameos, characters, creator backups,
+and now active discovery downloads.
+
+The app has been rebuilt around clear backup modes instead of one crowded panel.
+Choose the job you want to run, point SoraVault at a folder, scan or browse, and
+let it save the files, prompts, and metadata locally. Nothing goes through a
+SoraVault server.
+
+Thank you to everyone who tested, reported endpoint changes, shared edge cases,
+and used the tool while Sora was still here. It was nice to share this with you
+all.
+
+#### Added in 3.0.0
+
+- **Discover & Download mode** - a new active discovery mode that scans the Sora
+  Explore/Top feeds, discovers creators from the feed, and downloads matching
+  content as it is found. It uses its own `discover_download/` folder and
+  `discover_manifest.json` so discovery runs stay separate from Mirror Mode.
+- **Version-aware discovery** - Discover supports the Sora version you are
+  currently browsing on: Sora 1 or Sora 2. Pick the matching version before
+  starting. If you browse Sora 1 while Discover is set to Sora 2, or the other
+  way around, discovery cannot use the right feed/runtime state.
+- **Sora 1 discovery feeds** - Sora 1 Discover can target Explore, Videos, or
+  Images. Media type filters are enforced so a videos-only or images-only run
+  does not save the wrong file type.
+- **Sora 2 discovery feeds** - Sora 2 Discover supports Explore and includes Top
+  feed probing. Top is Sora 2-only and is disabled for Sora 1.
+- **Discover filters** - include keywords, exclude keywords, min/max likes,
+  date range, aspect ratio filters, max creators, optional character crawling,
+  polling, and prompt sidecars.
+- **Discover running status** - the live screen now shows the current feed or
+  creator being processed, feed pages, discovered creators, creator queue,
+  media queue, workers, screened/matched/filtered counts, duplicates, known
+  files, and recent per-creator summaries.
+- **Discover creator crawling** - discovered Sora 2 creators are crawled through
+  the existing Creator Backup path, including character posts and appearances
+  when enabled. Sora 1 feed creators are handled through Sora 1 discovery paths
+  and do not trigger Sora 2 creator requests.
+- **Creator Backup mode** - public Sora 2 creators can be added by username or
+  profile URL, validated live, remembered across reloads, and backed up into
+  `sora_v2_creators/{creator}/`.
+- **Creator character backup** - Creator Backup can also save a creator's
+  character posts and cameo appearances into nested character folders.
+- **My Characters backup** - Regular Backup can save your own characters,
+  character posts, character appearances, and character drafts where Sora exposes
+  them.
+- **Cameos and cameo drafts** - Regular Backup now includes public cameo posts
+  featuring you and private cameo drafts.
+- **Mirror Mode** - browse Sora normally and let SoraVault passively capture
+  items you scroll past. Mirror Mode saves into `mirror_browse/`, keeps an
+  append-only `mirror_manifest.json`, and supports likes and keyword filters.
+- **Open download folder action** - the final screen can open the browser's
+  downloads folder for extension/default-download flows, or reopen the selected
+  folder picker for File System Access downloads.
+- **Coffee/support visuals** - the download and done screens now include the new
+  local logo and coffee assets, packaged with the extension and with userscript
+  fallbacks.
+
+#### Changed in 3.0.0
+
+- **Complete UI rehaul** - the first screen is now an exclusive mode picker:
+  Regular Backup, Creator Backup, Mirror Mode, and Discover & Download. Modes no
+  longer stack accidentally, and the main action changes to match the selected
+  mode.
+- **Ready/download screens redesigned** - output toggles, filter summary,
+  active filter chips, progress card, category-aware activity text, ETA,
+  failures, and worker count were rebuilt for clearer long-running backups.
+- **Mirror running screen redesigned** - Mirror Mode now has a dedicated running
+  status view that matches the newer download UI and keeps its filters editable
+  while running.
+- **Download speed presets expanded** - speed now uses Safe, Balanced, Fast, and
+  Very Fast presets: 2, 4, 6, and 8 workers. Tampermonkey/GM mode remains capped
+  at 2 active workers.
+- **Worker pool retuning** - changing speed during an active download now
+  immediately starts extra workers when increasing speed, and lets excess
+  in-flight workers retire cleanly when decreasing speed.
+- **JSON manifest export timing** - JSON manifests are written before media
+  downloads begin when enabled, and manifest filenames include date and time so
+  repeated or partial backups do not overwrite earlier manifests.
+- **Characters enabled by default** - Regular Backup now includes Characters by
+  default and no longer labels the flow as a fragile preview in the start panel.
+- **Likes filtering improved** - likes are now read across more Sora 1 and Sora
+  2 response shapes, and likes filters show clearly in the ready-panel summary.
+- **Source rows clarified** - each Regular Backup source now has a shorter name
+  and a plain-language description.
+- **Scan and completion copy refreshed** - scan snippets, final actions, GitHub
+  star link, and Buy Me A Coffee call-to-action were cleaned up for the final
+  release.
+- **Extension frame support** - the Chrome extension now runs in same-origin
+  frames so Discover can warm Sora feed routes and use the current Sora runtime
+  state without showing duplicate panels in subframes.
+
+#### Fixed in 3.0.0
+
+- **Character drafts fixed** - replaced guessed character draft probes with the
+  confirmed endpoint:
+  `/backend/project_y/profile/drafts/cameos/character/{characterId}?limit=50`.
+- **Character appearances fixed** - character backup now fetches appearances
+  through `/backend/project_y/profile_feed/{characterId}?limit=50&cut=appearances`.
+- **Character ID handling hardened** - character lookup accepts multiple Sora
+  response shapes, including `user_id`, `id`, `character_id`, and
+  `profile.user_id`.
+- **Cameo/character draft ingestion fixed** - the V2 ingestion path now handles
+  draft wrappers where the actual video object is nested inside the response.
+- **Mirror profile/search capture fixed** - Mirror Mode now captures Sora
+  profile pages that load through `/backend/search`, including wrapped
+  `generation` objects.
+- **Mirror V1 download URLs fixed** - opportunistic Sora 1 captures preserve
+  signed `encodings.source.path` URLs and use the correct file extension instead
+  of assuming every captured item is an MP4.
+- **Mirror stop flow fixed** - returning to the start panel while Mirror is
+  running now shows a working `Stop Mirror Mode` action instead of a disabled
+  running button.
+- **Download stop flow fixed** - pressing Stop during downloads now waits for
+  active workers to finish their current files, then shows a partial-save end
+  screen instead of jumping back too early.
+- **Discover Sora 1 feed auth fixed** - Sora 1 feed probes now use warmed
+  same-origin frames and the live page fetch path so Sora's current feed token
+  can be attached when available. Tokens are never printed to the panel log.
+- **Discover duplicate self-ingest fixed** - Discover suppresses duplicate
+  ingestion of its own direct feed requests while still allowing passive capture
+  from normal Sora browsing.
+- **Worker reliability fixes** - active worker counts, speed changes,
+  queue-draining, and stop behavior were cleaned up across regular downloads,
+  Mirror Mode, and Discover & Download.
+
+#### Notes from 3.0.0
+
+- Discover & Download depends on live Sora feed/runtime state. It only supports
+  the Sora version you are currently browsing on, Sora 1 or Sora 2.
+- Top feed discovery is Sora 2-only.
+- Watermark removal is still optional, disabled by default, and powered by the
+  third-party `soravdl.com` proxy. Mirror Mode and Discover & Download use
+  direct downloads.
+- SoraVault will not work after Sora's APIs and media URLs are gone. Run your
+  backups while the service is still available.
+
+---
+
 ## [3.0.0] - 2026-04-25
 
 ### Final release
