@@ -260,6 +260,7 @@
         videosQueued: 0, imagesQueued: 0, creatorsWithMedia: 0,
         current: 'Idle', lastEvent: '', currentCreator: '',
     };
+    let discoverHelpReason       = '';
 
     // Creator Fetch state
     let creatorFetchEnabled      = false;
@@ -800,6 +801,7 @@
             discoverStats.mediaQueued++;
             if (item.isVideo || item.mode === 'v2') discoverStats.videosQueued++;
             else discoverStats.imagesQueued++;
+            setDiscoverHelp('');
             if (creatorStats) {
                 if (creatorStats.queued === 0) discoverStats.creatorsWithMedia++;
                 creatorStats.queued++;
@@ -1679,6 +1681,7 @@
         discoverStats.current = 'Starting';
         discoverStats.lastEvent = '';
         discoverStats.currentCreator = '';
+        setDiscoverHelp('');
     }
 
     function discoverCreatorKey(profile) {
@@ -1884,6 +1887,17 @@
         return entry.win;
     }
 
+    async function prewarmDiscoverSentinelRoutes() {
+        if (ENV.isFrame || storedV2Headers['openai-sentinel-token']) return;
+        const routes = ['/explore', '/explore/images', '/explore/videos', '/explore/top'];
+        for (const route of routes) {
+            if (storedV2Headers['openai-sentinel-token']) break;
+            try { await warmDiscoverFeedRoute(route); }
+            catch (e) {}
+            await sleep(350);
+        }
+    }
+
     async function discoverFetchFeedOnce(token) {
         let anyUseful = false;
         for (const endpoint of discoverFeedEndpoints()) {
@@ -1912,9 +1926,11 @@
                 if (!r.ok) {
                     log(`Discover probe ${endpoint.label}: HTTP ${r.status}`);
                     if (r.status === 400 && !storedV2Headers['openai-sentinel-token']) {
-                        log('Discover: no Sora feed sentinel learned yet. Open the matching Explore feed once so Sora can generate it.');
+                        log('Discover: no Sora feed sentinel learned yet. Open any Sora Explore feed once and scroll so Sora can generate it.');
+                        if (!hasDiscoverProgress()) setDiscoverHelp('Sora has not generated the feed token SoraVault needs for direct Discover requests yet.');
                     } else if (r.status === 400 && endpoint.usePageFetch) {
-                        log('Discover: Sora feed sentinel was present but rejected/expired; retrying after Sora refreshes the feed page usually fixes this.');
+                        log('Discover: Sora feed sentinel was present but rejected/expired; scrolling any Explore feed usually refreshes it.');
+                        if (!hasDiscoverProgress()) setDiscoverHelp('The learned feed token was rejected or expired.');
                     }
                     break;
                 }
@@ -1926,7 +1942,10 @@
                 const beforeCreators = discoverStats.creatorsFound;
                 const beforeCaptured = browseFetchStats.captured;
                 discoverIngestFeedPayload(data, referrerPath);
-                if (discoverStats.creatorsFound > beforeCreators || browseFetchStats.captured > beforeCaptured) anyUseful = true;
+                if (discoverStats.creatorsFound > beforeCreators || browseFetchStats.captured > beforeCaptured) {
+                    anyUseful = true;
+                    setDiscoverHelp('');
+                }
                 cursor = discoverReadCursor(data, endpoint);
                 updateMirrorRunningStats();
                 if ((data?.has_more === true || data?.hasMore === true) && !cursor) {
@@ -2093,8 +2112,12 @@
         while (discoverRunning && !stopRequested && token === discoverRunToken) {
             const ok = await discoverFetchFeedOnce(token);
             await discoverDrainCreatorQueue(token);
+            if (!ok) {
+                log('Discover: no media from direct probes yet. Open any Explore feed once while Discover is running, then scroll down so SoraVault can learn the live feed response.');
+                if (!hasDiscoverProgress()) setDiscoverHelp('No matching media was found from direct probes yet.');
+                else setDiscoverHelp('');
+            }
             if (!browseFetchFilters.keepPolling) break;
-            if (!ok) log('Discover: no media from direct probes yet. Open Explore once while Discover is running to let SoraVault learn the live feed response.');
             await sleep(DISCOVER_IDLE_SLEEP_MS);
         }
         if (token !== discoverRunToken) return;
@@ -2924,8 +2947,31 @@
         const liveText = document.getElementById('sdl-mirror-live-text');
         const countLabel = document.getElementById('sdl-mirror-count-label');
         const stopBtn = document.getElementById('sdl-stop-mirror');
+        const mirrorState = document.getElementById('sdl-s-mirror');
+        const runHeading = document.getElementById('sdl-run-heading');
+        const runSubtitle = document.getElementById('sdl-run-subtitle');
+        const runState = document.getElementById('sdl-run-state');
+        const runCreator = document.getElementById('sdl-run-creator');
+        const runSource = document.getElementById('sdl-run-source');
+        const runFiltered = document.getElementById('sdl-run-filtered');
+        const runCreatorsProgress = document.getElementById('sdl-run-creators-progress');
+        const runLastEvent = document.getElementById('sdl-run-last-event');
+        const flowDiscovered = document.getElementById('sdl-flow-discovered');
+        const flowMatched = document.getElementById('sdl-flow-matched');
+        const flowQueued = document.getElementById('sdl-flow-queued');
+        const flowSaved = document.getElementById('sdl-flow-saved');
+        const needsDiscoverAction = isDiscover && !!discoverHelpReason;
+        if (mirrorState) mirrorState.classList.toggle('discover-active', isDiscover);
+        if (mirrorState) mirrorState.classList.toggle('discover-needs-action', needsDiscoverAction);
+        if (runHeading) runHeading.textContent = isDiscover ? 'Auto Discover & Download' : 'Mirror Mode';
+        if (runSubtitle) runSubtitle.textContent = isDiscover
+            ? 'Continuously scans Sora feeds, filters results, and downloads matching content automatically.'
+            : 'Saving matching content while you browse Sora.';
+        if (runState) runState.textContent = needsDiscoverAction
+            ? 'ACTION NEEDED: scroll any Explore feed once'
+            : ((isDiscover || browseFetchEnabled) ? 'Running' : 'Idle');
         if (saved) saved.textContent = browseFetchManifest.size.toLocaleString();
-        if (countLabel) countLabel.textContent = isDiscover ? 'discover items saved' : 'mirror items saved';
+        if (countLabel) countLabel.textContent = isDiscover ? 'saved' : 'saved';
         if (liveText) liveText.textContent = isDiscover
             ? (discoverStats.current || `Discovering creators (${discoverStats.creatorsDone}/${discoverStats.creatorsFound})`)
             : 'Mirror Mode is watching your Sora browsing';
@@ -2934,16 +2980,35 @@
         const mirrorIncWrap = document.getElementById('sdl-mirror-include-wrap');
         const mirrorExcWrap = document.getElementById('sdl-mirror-exclude-wrap');
         if (mirrorMaxWrap) mirrorMaxWrap.style.display = isDiscover ? '' : 'none';
-        if (mirrorIncWrap) mirrorIncWrap.style.display = isDiscover ? 'none' : '';
-        if (mirrorExcWrap) mirrorExcWrap.style.display = isDiscover ? 'none' : '';
+        if (mirrorIncWrap) mirrorIncWrap.style.display = '';
+        if (mirrorExcWrap) mirrorExcWrap.style.display = '';
         const mirrorMin = document.getElementById('sdl-mirror-minlikes');
         const mirrorMax = document.getElementById('sdl-mirror-maxlikes');
+        const mirrorInclude = document.getElementById('sdl-mirror-include');
+        const mirrorExclude = document.getElementById('sdl-mirror-exclude');
         if (mirrorMin && document.activeElement !== mirrorMin) mirrorMin.value = String(browseFetchFilters.minLikes || 0);
         if (mirrorMax && document.activeElement !== mirrorMax) mirrorMax.value = browseFetchFilters.maxLikes == null ? '' : String(browseFetchFilters.maxLikes);
+        if (mirrorInclude && document.activeElement !== mirrorInclude) mirrorInclude.value = browseFetchFilters.include.join(', ');
+        if (mirrorExclude && document.activeElement !== mirrorExclude) mirrorExclude.value = browseFetchFilters.exclude.join(', ');
         if (captured) captured.textContent = browseFetchStats.captured.toLocaleString();
         if (queued) queued.textContent = browseFetchQueue.length.toLocaleString();
         if (failed) failed.textContent = browseFetchStats.failed.toLocaleString();
-        if (folder) folder.textContent = browseFetchBaseDir ? `${browseFetchBaseDir.name}/${getBrowseFetchRootName()}/` : '(no folder picked)';
+        if (folder) {
+            const folderText = browseFetchBaseDir ? `${browseFetchBaseDir.name}/${getBrowseFetchRootName()}/` : '(no folder picked)';
+            folder.textContent = folderText;
+            folder.title = 'Select and copy this folder text';
+        }
+        if (runCreator) runCreator.textContent = isDiscover ? (discoverStats.currentCreator || 'feed') : '';
+        if (runSource) runSource.textContent = isDiscover ? discoverFeedLabel() : 'Sora feed';
+        if (runFiltered) runFiltered.textContent = discoverStats.mediaFiltered.toLocaleString();
+        if (runCreatorsProgress) runCreatorsProgress.textContent = isDiscover
+            ? `${discoverStats.creatorsDone} / ${discoverStats.creatorsFound} done`
+            : 'watching current page';
+        if (runLastEvent) runLastEvent.textContent = discoverStats.lastEvent || 'waiting';
+        if (flowDiscovered) flowDiscovered.textContent = discoverStats.mediaScreened.toLocaleString();
+        if (flowMatched) flowMatched.textContent = discoverStats.mediaQueued.toLocaleString();
+        if (flowQueued) flowQueued.textContent = browseFetchQueue.length.toLocaleString();
+        if (flowSaved) flowSaved.textContent = browseFetchManifest.size.toLocaleString();
         if (discoverDetail) {
             discoverDetail.style.display = isDiscover ? '' : 'none';
             if (isDiscover) {
@@ -3038,6 +3103,13 @@
         stopMirrorStatsTimer();
         setState('init');
         updateScanButton();
+    }
+
+    function hasDiscoverProgress() {
+        return discoverStats.creatorsFound > 0
+            || discoverStats.mediaQueued > 0
+            || browseFetchStats.captured > 0
+            || browseFetchManifest.size > 0;
     }
 
     async function startDiscoverMode() {
@@ -3909,6 +3981,30 @@
         el.style.display = text ? '' : 'none';
     }
 
+    function setDiscoverHelp(reason = '') {
+        discoverHelpReason = reason || '';
+        const el = document.getElementById('sdl-discover-help');
+        if (!el) return;
+        if (!discoverHelpReason) {
+            el.style.display = 'none';
+            el.innerHTML = '';
+            return;
+        }
+        const esc = s => String(s).replace(/[&<>"']/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[ch]));
+        const routeUrl = `${location.origin}/explore`;
+        el.innerHTML = `
+          <strong>Discover needs one live Sora feed load.</strong>
+          <span>${esc(discoverHelpReason)}</span>
+          <ol>
+            <li>Open <a href="${esc(routeUrl)}">any Sora Explore feed</a> in Sora 1 or Sora 2.</li>
+            <li>Scroll down once until Sora loads more feed items.</li>
+            <li>Leave Discover running; SoraVault will learn the live response and continue automatically.</li>
+          </ol>
+          <em>The feed does not need to match your backup target. Scrolling Sora 2 can unlock a Sora 1 Discover run, and the other way around.</em>
+        `;
+        el.style.display = '';
+    }
+
     function renderActivityLine() {
         const el = document.getElementById('sdl-activity-left');
         if (!el) return;
@@ -4191,6 +4287,9 @@
   color:rgba(255,255,255,0.88); font-size:13px; font-weight:700;
   text-align:right; word-break:break-word;
 }
+#sdl-mirror-folder {
+  user-select:text; cursor:text; font-family:monospace; max-width:70%;
+}
 .sdl-discover-detail { border-bottom:0.5px solid rgba(255,255,255,0.075); background:rgba(5,10,18,0.2); }
 .sdl-discover-stat-row {
   display:flex; align-items:flex-start; justify-content:space-between; gap:10px;
@@ -4222,6 +4321,133 @@
   margin-top:8px; font-size:11px; line-height:1.45; text-align:center;
   color:rgba(147,197,253,0.72);
 }
+.sdl-discover-setup-card {
+  border:0.5px solid rgba(255,255,255,0.12);
+  border-radius:10px; padding:11px 12px; margin:9px 0;
+  background:rgba(255,255,255,0.026);
+}
+.sdl-discover-setup-card.compact { padding-bottom:9px; }
+.sdl-discover-setup-title {
+  display:flex; align-items:center; gap:6px; margin-bottom:9px;
+  color:rgba(255,255,255,0.86); font-size:12px; font-weight:750;
+}
+.sdl-discover-setup-title span { color:rgba(255,221,0,0.9); font-weight:800; }
+.sdl-discover-setup-card .sdl-bf-row { flex-wrap:wrap; align-items:flex-end; }
+.sdl-discover-setup-card .sdl-bf-lbl { flex:1 1 118px; }
+.sdl-discover-setup-card .sdl-bf-lbl-inline { flex:0 1 auto; min-height:28px; }
+.sdl-discover-setup-card .sdl-bf-folder { margin:7px 2px 0; }
+.sdl-pick-folder { width:100%; margin:0; }
+.sdl-discover-output {
+  display:grid; grid-template-columns:1fr; gap:5px; padding:7px 9px;
+  border:0.5px solid rgba(255,255,255,0.09); border-radius:10px;
+  background:rgba(0,0,0,0.16); font-size:10.5px; color:rgba(255,255,255,0.46);
+}
+.sdl-discover-output strong { display:block; margin-top:2px; color:rgba(96,165,250,0.95); font-family:monospace; font-size:10.5px; }
+.sdl-run-title {
+  display:flex; align-items:flex-start; justify-content:space-between; gap:10px; margin-bottom:12px;
+}
+.sdl-run-title h2 {
+  margin:0 0 4px; color:rgba(255,255,255,0.92); font-size:20px; line-height:1.15; letter-spacing:0;
+}
+.sdl-run-title p { margin:0; color:rgba(255,255,255,0.46); font-size:11px; line-height:1.35; }
+.sdl-run-title .sdl-btn { width:auto; margin:0; padding:7px 10px; white-space:nowrap; }
+.sdl-discover-help {
+  display:none; margin:-2px 0 10px; padding:12px 14px;
+  border:0.5px solid rgba(251,191,36,0.38); border-radius:12px;
+  background:linear-gradient(135deg,rgba(251,191,36,0.14),rgba(5,10,18,0.82));
+  box-shadow:0 0 0 1px rgba(251,191,36,0.06) inset;
+  color:rgba(255,255,255,0.78); font-size:11.5px; line-height:1.45;
+}
+.sdl-discover-help strong {
+  display:block; margin-bottom:4px; color:rgba(255,255,255,0.94); font-size:13px;
+}
+.sdl-discover-help span { display:block; color:rgba(255,255,255,0.62); }
+.sdl-discover-help ol { margin:8px 0 0 18px; padding:0; }
+.sdl-discover-help li { margin:3px 0; }
+.sdl-discover-help a { color:rgba(96,165,250,0.96); text-decoration:underline; text-underline-offset:2px; }
+.sdl-discover-help em { display:block; margin-top:8px; color:rgba(251,191,36,0.9); font-style:normal; }
+.sdl-run-status-card {
+  display:grid; grid-template-columns:auto minmax(0,1fr);
+  gap:12px; align-items:center; padding:12px;
+  border:0.5px solid rgba(96,165,250,0.28); border-radius:12px;
+  background:linear-gradient(135deg,rgba(30,64,175,0.16),rgba(5,10,18,0.78));
+  box-shadow:0 0 0 1px rgba(96,165,250,0.06) inset; margin-bottom:10px;
+}
+.sdl-run-orb {
+  width:54px; height:54px; border-radius:50%;
+  display:flex; align-items:center; justify-content:center;
+  border:3px solid rgba(52,211,153,0.95); color:white; background:rgba(0,0,0,0.52);
+  box-shadow:0 0 22px rgba(52,211,153,0.36), inset 0 0 18px rgba(96,165,250,0.16);
+  font-size:24px; font-weight:800;
+}
+.sdl-run-status-main { min-width:0; display:flex; flex-direction:column; gap:5px; }
+.sdl-run-status-card > .sdl-run-status-main:nth-child(3),
+.sdl-run-status-card > .sdl-run-status-main:nth-child(4) {
+  grid-column:1 / -1; padding-top:8px; border-top:0.5px solid rgba(255,255,255,0.07);
+}
+.sdl-run-status-main strong {
+  color:rgba(255,255,255,0.9); font-size:12.5px; line-height:1.25; overflow-wrap:anywhere;
+}
+.sdl-run-kicker { color:rgba(255,255,255,0.42); font-size:9px; text-transform:uppercase; letter-spacing:0.03em; }
+.sdl-run-pill {
+  width:max-content; display:inline-flex; align-items:center; gap:6px; padding:3px 8px; border-radius:7px;
+  color:rgba(52,211,153,0.95); background:rgba(52,211,153,0.1); font-size:10px; font-weight:750;
+}
+.discover-needs-action .sdl-run-pill {
+  max-width:100%; width:auto; color:rgba(251,191,36,0.98);
+  background:rgba(251,191,36,0.14); border:0.5px solid rgba(251,191,36,0.32);
+}
+.discover-needs-action .sdl-run-pill .sdl-mirror-live-dot {
+  background:#facc15; box-shadow:0 0 14px rgba(250,204,21,0.78);
+}
+.discover-needs-action .sdl-run-orb {
+  border-color:rgba(251,191,36,0.95);
+  box-shadow:0 0 22px rgba(251,191,36,0.36), inset 0 0 18px rgba(251,191,36,0.14);
+}
+.discover-needs-action .sdl-run-status-card {
+  border-color:rgba(251,191,36,0.42);
+  background:linear-gradient(135deg,rgba(120,77,10,0.2),rgba(5,10,18,0.82));
+}
+.sdl-run-mini-stats {
+  grid-column:1 / -1; display:grid; grid-template-columns:repeat(4,1fr); gap:7px;
+}
+.sdl-run-mini-stats span {
+  min-width:0; padding:8px 6px; border:0.5px solid rgba(255,255,255,0.08); border-radius:8px;
+  background:rgba(255,255,255,0.025); text-align:center;
+}
+.sdl-run-mini-stats strong { display:block; color:rgba(255,255,255,0.9); font-size:18px; line-height:1; margin-bottom:4px; }
+.sdl-run-mini-stats em { display:block; color:rgba(255,255,255,0.42); font-size:8px; text-transform:uppercase; font-style:normal; line-height:1.15; }
+.sdl-discover-flow {
+  display:grid; grid-template-columns:1fr auto 1fr auto 1fr auto 1fr; gap:8px; align-items:center;
+  padding:10px 12px; border:0.5px solid rgba(14,165,233,0.28); border-radius:12px;
+  background:rgba(14,165,233,0.06); margin-bottom:10px;
+}
+.sdl-discover-flow div { min-width:0; }
+.sdl-discover-flow strong { display:block; color:rgba(255,255,255,0.9); font-size:12px; margin-bottom:4px; }
+.sdl-discover-flow span { display:block; color:rgba(255,255,255,0.46); font-size:10px; }
+.sdl-discover-flow b { color:rgba(34,211,238,0.95); font-size:15px; margin-right:2px; }
+.sdl-discover-flow i { width:20px; height:1px; background:rgba(34,211,238,0.75); position:relative; }
+.sdl-discover-flow i:after {
+  content:""; position:absolute; right:-1px; top:-3px; width:6px; height:6px;
+  border-right:1px solid rgba(34,211,238,0.85); border-top:1px solid rgba(34,211,238,0.85); transform:rotate(45deg);
+}
+.sdl-run-grid { display:grid; grid-template-columns:1fr; gap:10px; margin-bottom:10px; }
+.sdl-run-card-title { padding:10px 14px; color:rgba(255,255,255,0.86); font-size:12px; font-weight:750; border-bottom:0.5px solid rgba(255,255,255,0.075); }
+.sdl-discover-advanced {
+  border:0.5px solid rgba(255,255,255,0.1); border-radius:12px; overflow:hidden;
+  background:rgba(255,255,255,0.02); margin-bottom:10px;
+}
+.sdl-discover-advanced summary {
+  cursor:pointer; padding:11px 14px; color:rgba(255,255,255,0.86); font-size:12px; font-weight:750;
+  list-style:none; user-select:none;
+}
+.sdl-discover-advanced summary::-webkit-details-marker { display:none; }
+.sdl-discover-advanced summary:after { content:"v"; float:right; color:rgba(255,255,255,0.72); }
+.sdl-discover-advanced[open] summary:after { content:"^"; }
+#sdl-s-mirror:not(.discover-active) #sdl-discover-flow,
+#sdl-s-mirror:not(.discover-active) #sdl-discover-advanced,
+#sdl-s-mirror:not(.discover-active) .sdl-run-status-card > .sdl-run-status-main:nth-child(3),
+#sdl-s-mirror:not(.discover-active) .sdl-run-status-card > .sdl-run-status-main:nth-child(4) { display:none; }
 
 /* Header mini indicator: pulsing monitor shown only when minimised and Mirror is active */
 #sdl-bf-mini {
@@ -5086,8 +5312,12 @@ select.sdl-bf-input { min-height:28px; resize:none; }
         <span class="sdl-mode-arrow">⌄</span>
       </div>
       <div class="sdl-mode-body" id="sdl-discover-body" style="display:none;">
-        <button class="sdl-btn sdl-btn-secondary" id="sdl-discover-pick" style="margin:6px 0;">Pick folder...</button>
+        <div style="display:none">
+        <button class="sdl-btn sdl-btn-secondary sdl-pick-folder" id="sdl-discover-pick">Pick folder...</button>
         <div id="sdl-discover-folder" class="sdl-bf-folder">(no folder picked yet)</div>
+        </div>
+        <div class="sdl-discover-setup-card">
+          <div class="sdl-discover-setup-title">Discovery Scope</div>
         <div class="sdl-bf-row">
           <label class="sdl-bf-lbl">Sora version
             <select id="sdl-discover-version" class="sdl-bf-input">
@@ -5106,6 +5336,9 @@ select.sdl-bf-input { min-height:28px; resize:none; }
             <input type="checkbox" id="sdl-discover-toponly">
           </label>
         </div>
+        </div>
+        <div class="sdl-discover-setup-card">
+          <div class="sdl-discover-setup-title">Filters</div>
         <div class="sdl-bf-row">
           <label class="sdl-bf-lbl">Min likes
             <input type="number" id="sdl-discover-minlikes" min="0" value="0" class="sdl-bf-input sdl-bf-input-num">
@@ -5134,18 +5367,21 @@ select.sdl-bf-input { min-height:28px; resize:none; }
         <label class="sdl-bf-lbl">Aspect ratios
           <input id="sdl-discover-ratios" class="sdl-bf-input" placeholder="e.g. 16:9, 9:16">
         </label>
+        </div>
+        <div class="sdl-discover-setup-card">
+          <div class="sdl-discover-setup-title">Options</div>
         <div class="sdl-bf-row">
           <label class="sdl-bf-lbl sdl-bf-lbl-inline" id="sdl-discover-chars-wrap">Include creator characters
             <input type="checkbox" id="sdl-discover-chars" checked>
           </label>
-          <label class="sdl-bf-lbl sdl-bf-lbl-inline">Keep polling
+          <label class="sdl-bf-lbl sdl-bf-lbl-inline" style="display:none">Keep polling
             <input type="checkbox" id="sdl-discover-poll" checked>
           </label>
           <label class="sdl-bf-lbl sdl-bf-lbl-inline">Save prompts
             <input type="checkbox" id="sdl-discover-savetxt" checked>
           </label>
         </div>
-        <div class="sdl-bf-hint">Folder: <code>discover_download/</code> · manifest: <code>discover_manifest.json</code> · default speed: Balanced (4 workers)</div>
+        </div>
       </div>
     </div>
     <!-- /Discover section -->
@@ -5177,40 +5413,78 @@ select.sdl-bf-input { min-height:28px; resize:none; }
 
   <!-- ─── STATE: ready ─────────────────────────────────────── -->
   <div id="sdl-s-mirror" style="display:none">
-    <div class="sdl-mirror-hero">
-      <div class="sdl-big-count">
-        <span class="n" id="sdl-mirror-saved">0</span>
-        <span class="lbl" id="sdl-mirror-count-label">mirror items saved</span>
+    <div class="sdl-run-title">
+      <div>
+        <h2 id="sdl-run-heading">Mirror Mode</h2>
+        <p id="sdl-run-subtitle">Saving matching content while you browse Sora.</p>
       </div>
-      <div class="sdl-mirror-live"><span class="sdl-mirror-live-dot"></span><span id="sdl-mirror-live-text">Mirror Mode is watching your Sora browsing</span></div>
-      <div class="sdl-mirror-minimize-hint">You can minimise SoraVault now. When the glowing monitor is visible, Mirror Mode is still scanning in the background.</div>
+      <button class="sdl-btn sdl-btn-stop" id="sdl-stop-mirror">Stop Mirror Mode</button>
     </div>
-    <div class="sdl-mirror-panel">
-      <div class="sdl-mirror-row"><span>Folder</span><strong id="sdl-mirror-folder">(no folder picked)</strong></div>
-      <div class="sdl-mirror-row"><span>Captured</span><strong id="sdl-mirror-captured">0</strong></div>
-      <div class="sdl-mirror-row"><span>Queued</span><strong id="sdl-mirror-queued">0</strong></div>
-      <div class="sdl-mirror-row"><span>Failed</span><strong id="sdl-mirror-failed">0</strong></div>
-      <div class="sdl-discover-detail" id="sdl-discover-detail" style="display:none;"></div>
-      <div class="sdl-mirror-filter-controls">
-        <div class="sdl-bf-row">
-          <label class="sdl-bf-lbl">Min likes
-            <input type="number" id="sdl-mirror-minlikes" min="0" value="0" class="sdl-bf-input sdl-bf-input-num">
+    <div class="sdl-discover-help" id="sdl-discover-help"></div>
+
+    <div class="sdl-run-status-card">
+      <div class="sdl-run-orb"><span>+</span></div>
+      <div class="sdl-run-status-main">
+        <div class="sdl-run-pill"><span class="sdl-mirror-live-dot"></span><span id="sdl-run-state">Running</span></div>
+        <span class="sdl-run-kicker">Current task</span>
+        <strong id="sdl-mirror-live-text">Mirror Mode is watching your Sora browsing</strong>
+      </div>
+      <div class="sdl-run-status-main">
+        <span class="sdl-run-kicker">Current creator</span>
+        <strong id="sdl-run-creator">feed</strong>
+      </div>
+      <div class="sdl-run-status-main">
+        <span class="sdl-run-kicker">Source</span>
+        <strong id="sdl-run-source">Sora feed</strong>
+      </div>
+    </div>
+
+    <div class="sdl-discover-flow" id="sdl-discover-flow">
+      <div><strong>Discover</strong><span><b id="sdl-flow-discovered">0</b> discovered</span></div>
+      <i></i>
+      <div><strong>Filter</strong><span><b id="sdl-flow-matched">0</b> matched</span></div>
+      <i></i>
+      <div><strong>Queue</strong><span><b id="sdl-mirror-queued">0</b> queued</span></div>
+      <i></i>
+      <div><strong>Download</strong><span><b id="sdl-mirror-saved">0</b> saved</span></div>
+    </div>
+
+    <div class="sdl-run-grid">
+      <div class="sdl-mirror-panel">
+        <div class="sdl-run-card-title">Live Activity</div>
+        <div class="sdl-mirror-row"><span>Folder</span><strong id="sdl-mirror-folder">(no folder picked)</strong></div>
+        <div class="sdl-mirror-row"><span>Captured</span><strong id="sdl-mirror-captured">0</strong></div>
+        <div class="sdl-mirror-row"><span>Scanned creators</span><strong id="sdl-run-creators-progress">0 / 0 done</strong></div>
+        <div class="sdl-mirror-row"><span>Errors</span><strong id="sdl-mirror-failed">0</strong></div>
+        <div class="sdl-mirror-row"><span>Last event</span><strong id="sdl-run-last-event">waiting</strong></div>
+      </div>
+
+      <div class="sdl-mirror-panel">
+        <div class="sdl-run-card-title">Filters</div>
+        <div class="sdl-mirror-filter-controls">
+          <div class="sdl-bf-row">
+            <label class="sdl-bf-lbl">Min likes
+              <input type="number" id="sdl-mirror-minlikes" min="0" value="0" class="sdl-bf-input sdl-bf-input-num">
+            </label>
+            <label class="sdl-bf-lbl" id="sdl-mirror-maxlikes-wrap" style="display:none;">Max likes
+              <input type="number" id="sdl-mirror-maxlikes" min="0" class="sdl-bf-input sdl-bf-input-num" placeholder="any">
+            </label>
+          </div>
+          <label class="sdl-bf-lbl" id="sdl-mirror-include-wrap">Include keywords (comma-separated)
+            <textarea id="sdl-mirror-include" class="sdl-bf-input" rows="1" placeholder="e.g. anime, cyberpunk"></textarea>
           </label>
-          <label class="sdl-bf-lbl" id="sdl-mirror-maxlikes-wrap" style="display:none;">Max likes
-            <input type="number" id="sdl-mirror-maxlikes" min="0" class="sdl-bf-input sdl-bf-input-num" placeholder="any">
+          <label class="sdl-bf-lbl" id="sdl-mirror-exclude-wrap">Exclude keywords (comma-separated)
+            <textarea id="sdl-mirror-exclude" class="sdl-bf-input" rows="1" placeholder="e.g. nsfw"></textarea>
           </label>
         </div>
-        <label class="sdl-bf-lbl" id="sdl-mirror-include-wrap">Include keywords (comma-separated)
-          <textarea id="sdl-mirror-include" class="sdl-bf-input" rows="1" placeholder="e.g. anime, cyberpunk"></textarea>
-        </label>
-        <label class="sdl-bf-lbl" id="sdl-mirror-exclude-wrap">Exclude keywords (comma-separated)
-          <textarea id="sdl-mirror-exclude" class="sdl-bf-input" rows="1" placeholder="e.g. nsfw"></textarea>
-        </label>
+        <div class="sdl-mirror-filters" id="sdl-mirror-filters">prompts on</div>
       </div>
-      <div class="sdl-mirror-filters" id="sdl-mirror-filters">prompts on</div>
     </div>
-    <button class="sdl-btn sdl-btn-stop" id="sdl-stop-mirror">Stop Mirror Mode</button>
-    <button class="sdl-btn sdl-btn-secondary" id="sdl-mirror-back">Back to start</button>
+
+    <details class="sdl-discover-advanced" id="sdl-discover-advanced" open>
+      <summary>Advanced statistics</summary>
+      <div class="sdl-discover-detail" id="sdl-discover-detail" style="display:none;"></div>
+    </details>
   </div>
 
   <div id="sdl-s-ready" style="display:none">
@@ -5629,9 +5903,9 @@ select.sdl-bf-input { min-height:28px; resize:none; }
             if (browseFetchMode === 'discover' || discoverRunning) stopDiscoverMode();
             else stopMirrorMode();
         });
-        document.getElementById('sdl-mirror-back').addEventListener('click', () => {
-            if (discoverRunning) return;
+        document.getElementById('sdl-mirror-back')?.addEventListener('click', () => {
             setState('init');
+            if (discoverRunning || browseFetchEnabled) startMirrorStatsTimer();
             updateScanButton();
         });
         document.getElementById('sdl-stop-dl').addEventListener('click',   stopAll);
@@ -5711,8 +5985,13 @@ select.sdl-bf-input { min-height:28px; resize:none; }
             if (source === 'mirror' && browseFetchMode === 'discover') {
                 const maxLikes = parseInt(mirrorMaxLikes.value);
                 browseFetchFilters.maxLikes = Number.isFinite(maxLikes) && maxLikes >= 0 ? maxLikes : null;
+                browseFetchFilters.include = parseTerms(includeEl.value);
+                browseFetchFilters.exclude = parseTerms(excludeEl.value);
                 setIfDifferent(discoverMinLikes, String(browseFetchFilters.minLikes || 0));
                 setIfDifferent(discoverMaxLikes, browseFetchFilters.maxLikes == null ? '' : String(browseFetchFilters.maxLikes));
+                setIfDifferent(discoverInclude, browseFetchFilters.include.join(', '));
+                setIfDifferent(discoverExclude, browseFetchFilters.exclude.join(', '));
+                if (discoverHelpReason) setDiscoverHelp(discoverHelpReason);
                 updateMirrorRunningStats();
                 return;
             }
@@ -5767,6 +6046,7 @@ select.sdl-bf-input { min-height:28px; resize:none; }
             renderDiscoverV1FeedButtons();
             setIfDifferent(mirrorMinLikes, String(browseFetchFilters.minLikes || 0));
             setIfDifferent(mirrorMaxLikes, browseFetchFilters.maxLikes == null ? '' : String(browseFetchFilters.maxLikes));
+            if (discoverHelpReason) setDiscoverHelp(discoverHelpReason);
             updateMirrorRunningStats();
         };
         [
@@ -6014,6 +6294,7 @@ select.sdl-bf-input { min-height:28px; resize:none; }
         updateScanButton();
         updateWatermarkEstimateBadge();
         setState('init');
+        setTimeout(prewarmDiscoverSentinelRoutes, 2200);
 
         // Geo-check: first attempt after page settles, then poll every 10s if blocked or initializing
         setTimeout(preflightV2Check, 2500);
